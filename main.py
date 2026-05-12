@@ -1,0 +1,1042 @@
+import os
+import uuid
+from io import StringIO
+
+import cv2
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
+
+import models
+from database import engine, get_db
+from processador_imagem import ler_respostas_grade_fixa, processar_folha
+
+
+UPLOAD_DIR = "uploads"
+ALTERNATIVAS_VALIDAS = {"A", "B", "C", "D"}
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+
+app = FastAPI(title="Sistema de Correcao de Gabaritos")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+models.Base.metadata.create_all(bind=engine)
+
+
+def _preparar_banco():
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                """
+                alter table if exists gabaritos
+                drop constraint if exists gabaritos_modelo_prova_id_numero_questao_key
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                do $$
+                begin
+                    if not exists (
+                        select 1
+                        from pg_constraint
+                        where conname = 'uq_gabaritos_modelo_serie_questao'
+                    ) then
+                        alter table gabaritos
+                        add constraint uq_gabaritos_modelo_serie_questao
+                        unique (modelo_prova_id, serie, numero_questao);
+                    end if;
+                end $$;
+                """
+            )
+        )
+
+
+_preparar_banco()
+
+
+def _buscar_modelo_prova(db: Session, escola_id: str, bimestre: int, dia: int):
+    modelo = (
+        db.query(models.ModeloProva)
+        .filter(models.ModeloProva.escola_id == escola_id)
+        .filter(models.ModeloProva.bimestre == bimestre)
+        .filter(models.ModeloProva.dia == dia)
+        .first()
+    )
+
+    if not modelo:
+        raise HTTPException(status_code=404, detail="Modelo de prova nao encontrado")
+
+    return modelo
+
+
+def _extrair_serie_turma(nome_turma: str):
+    if not nome_turma:
+        return None
+
+    digitos = "".join(caractere for caractere in nome_turma if caractere.isdigit())
+    return int(digitos) if digitos else None
+
+
+def _buscar_serie_aluno(db: Session, aluno_id: str):
+    aluno = db.query(models.Aluno).filter(models.Aluno.id == aluno_id).first()
+
+    if not aluno:
+        raise HTTPException(status_code=404, detail="Aluno nao encontrado")
+
+    turma = db.query(models.Turma).filter(models.Turma.id == aluno.turma_id).first()
+    serie = _extrair_serie_turma(turma.nome if turma else "")
+
+    if not serie:
+        raise HTTPException(status_code=400, detail="Nao consegui identificar a serie do aluno")
+
+    return serie
+
+
+def _buscar_gabarito(db: Session, modelo_id, serie: int):
+    gabaritos = (
+        db.query(models.Gabarito)
+        .filter(models.Gabarito.modelo_prova_id == modelo_id)
+        .filter(models.Gabarito.serie == serie)
+        .order_by(models.Gabarito.numero_questao)
+        .all()
+    )
+
+    if not gabaritos:
+        raise HTTPException(status_code=404, detail=f"Gabarito oficial da serie {serie} nao encontrado")
+
+    return gabaritos
+
+
+def _normalizar_resposta(resposta):
+    if resposta is None:
+        return None
+
+    resposta = str(resposta).strip().upper()
+    return resposta if resposta in ALTERNATIVAS_VALIDAS else None
+
+
+def _salvar_upload(foto: UploadFile, conteudo: bytes):
+    if not foto.filename:
+        raise HTTPException(status_code=400, detail="Arquivo sem nome")
+
+    extensao = os.path.splitext(foto.filename)[1].lower().replace(".", "")
+    if extensao not in {"jpg", "jpeg", "png", "webp", "bmp"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Formato de imagem invalido. Use jpg, jpeg, png, webp ou bmp.",
+        )
+
+    if not conteudo:
+        raise HTTPException(status_code=400, detail="Arquivo de imagem vazio")
+
+    nome_arquivo = f"{uuid.uuid4()}.{extensao}"
+    caminho_arquivo = os.path.join(UPLOAD_DIR, nome_arquivo)
+
+    with open(caminho_arquivo, "wb") as arquivo:
+        arquivo.write(conteudo)
+
+    return nome_arquivo, caminho_arquivo
+
+
+def _comparar_e_salvar_respostas(db: Session, aluno_id: str, modelo_id, gabaritos, respostas_detectadas):
+    acertos = 0
+    respostas_salvas = []
+
+    (
+        db.query(models.RespostaAluno)
+        .filter(models.RespostaAluno.aluno_id == aluno_id)
+        .filter(models.RespostaAluno.modelo_prova_id == modelo_id)
+        .delete(synchronize_session=False)
+    )
+
+    for gab in gabaritos:
+        resposta_aluno = _normalizar_resposta(
+            respostas_detectadas.get(gab.numero_questao)
+            or respostas_detectadas.get(str(gab.numero_questao))
+        )
+        resposta_correta = _normalizar_resposta(gab.resposta_correta)
+        acertou = resposta_aluno == resposta_correta
+
+        if acertou:
+            acertos += 1
+
+        nova_resposta = models.RespostaAluno(
+            aluno_id=aluno_id,
+            modelo_prova_id=modelo_id,
+            numero_questao=gab.numero_questao,
+            disciplina=gab.disciplina,
+            resposta_aluno=resposta_aluno,
+            resposta_correta=resposta_correta,
+            acertou=acertou,
+        )
+
+        db.add(nova_resposta)
+        respostas_salvas.append(
+            {
+                "numero_questao": gab.numero_questao,
+                "disciplina": gab.disciplina,
+                "resposta_aluno": resposta_aluno,
+                "resposta_correta": resposta_correta,
+                "acertou": acertou,
+            }
+        )
+
+    return acertos, respostas_salvas
+
+
+def _calcular_nota(acertos: int, total_questoes: int):
+    return round((acertos / total_questoes) * 10, 1) if total_questoes else 0
+
+
+def _calcular_nota_global_bimestre(db: Session, aluno_id: str, escola_id: str, bimestre: int):
+    resultados = (
+        db.query(models.ResultadoAluno)
+        .filter(models.ResultadoAluno.aluno_id == aluno_id)
+        .filter(models.ResultadoAluno.escola_id == escola_id)
+        .filter(models.ResultadoAluno.bimestre == bimestre)
+        .all()
+    )
+    acertos = sum(resultado.acertos for resultado in resultados)
+    total_questoes = sum(resultado.total_questoes for resultado in resultados)
+
+    return {
+        "acertos_global": acertos,
+        "total_questoes_global": total_questoes,
+        "nota_global": _calcular_nota(acertos, total_questoes),
+    }
+
+
+def _salvar_resultado_aluno(
+    db: Session,
+    aluno_id: str,
+    modelo,
+    serie: int,
+    acertos: int,
+    total_questoes: int,
+):
+    nota_dia = _calcular_nota(acertos, total_questoes)
+
+    resultado = (
+        db.query(models.ResultadoAluno)
+        .filter(models.ResultadoAluno.aluno_id == aluno_id)
+        .filter(models.ResultadoAluno.modelo_prova_id == modelo.id)
+        .first()
+    )
+
+    if not resultado:
+        resultado = models.ResultadoAluno(
+            aluno_id=aluno_id,
+            modelo_prova_id=modelo.id,
+            escola_id=modelo.escola_id,
+            bimestre=modelo.bimestre,
+            dia=modelo.dia,
+            serie=serie,
+            acertos=acertos,
+            total_questoes=total_questoes,
+            nota_global=nota_dia,
+        )
+        db.add(resultado)
+    else:
+        resultado.escola_id = modelo.escola_id
+        resultado.bimestre = modelo.bimestre
+        resultado.dia = modelo.dia
+        resultado.serie = serie
+        resultado.acertos = acertos
+        resultado.total_questoes = total_questoes
+        resultado.nota_global = nota_dia
+
+    db.flush()
+
+    return nota_dia
+
+
+def _tabular_respostas(respostas):
+    respostas_ordenadas = sorted(
+        respostas,
+        key=lambda resposta: resposta["numero_questao"],
+    )
+
+    por_questao = {
+        f"q{resposta['numero_questao']}": resposta["resposta_aluno"]
+        for resposta in respostas_ordenadas
+    }
+
+    por_disciplina = {}
+
+    for resposta in respostas_ordenadas:
+        disciplina = resposta["disciplina"] or "Sem disciplina"
+
+        if disciplina not in por_disciplina:
+            por_disciplina[disciplina] = {
+                "respostas": {},
+                "acertos": 0,
+                "total": 0,
+            }
+
+        por_disciplina[disciplina]["respostas"][f"q{resposta['numero_questao']}"] = resposta[
+            "resposta_aluno"
+        ]
+        por_disciplina[disciplina]["total"] += 1
+
+        if resposta["acertou"]:
+            por_disciplina[disciplina]["acertos"] += 1
+
+    for resumo in por_disciplina.values():
+        resumo["nota"] = _calcular_nota(resumo["acertos"], resumo["total"])
+
+    return {
+        "por_questao": por_questao,
+        "por_disciplina": por_disciplina,
+        "linhas": respostas_ordenadas,
+    }
+
+
+def _resposta_aluno_para_dict(resposta):
+    return {
+        "numero_questao": resposta.numero_questao,
+        "disciplina": resposta.disciplina,
+        "resposta_aluno": resposta.resposta_aluno,
+        "resposta_correta": resposta.resposta_correta,
+        "acertou": resposta.acertou,
+    }
+
+
+def _formatar_nota_csv(valor):
+    if valor is None:
+        return ""
+
+    return str(valor).replace(".", ",")
+
+
+def _celula_csv(valor):
+    return f'"{str(valor).replace(chr(34), chr(34) + chr(34))}"'
+
+
+def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
+    modelos = (
+        db.query(models.ModeloProva)
+        .filter(models.ModeloProva.escola_id == escola_id)
+        .filter(models.ModeloProva.bimestre == bimestre)
+        .order_by(models.ModeloProva.dia)
+        .all()
+    )
+
+    if not modelos:
+        raise HTTPException(status_code=404, detail="Modelo de prova nao encontrado")
+
+    modelo_ids = [modelo.id for modelo in modelos]
+    turmas = (
+        db.query(models.Turma)
+        .filter(models.Turma.escola_id == escola_id)
+        .order_by(models.Turma.nome)
+        .all()
+    )
+    turma_ids = [turma.id for turma in turmas]
+    turma_por_id = {turma.id: turma for turma in turmas}
+
+    alunos = (
+        db.query(models.Aluno)
+        .filter(models.Aluno.turma_id.in_(turma_ids))
+        .order_by(models.Aluno.numero_chamada)
+        .all()
+        if turma_ids
+        else []
+    )
+    aluno_ids = [aluno.id for aluno in alunos]
+
+    respostas = (
+        db.query(models.RespostaAluno)
+        .filter(models.RespostaAluno.modelo_prova_id.in_(modelo_ids))
+        .filter(models.RespostaAluno.aluno_id.in_(aluno_ids))
+        .all()
+        if aluno_ids
+        else []
+    )
+    resultados = (
+        db.query(models.ResultadoAluno)
+        .filter(models.ResultadoAluno.modelo_prova_id.in_(modelo_ids))
+        .filter(models.ResultadoAluno.aluno_id.in_(aluno_ids))
+        .all()
+        if aluno_ids
+        else []
+    )
+
+    disciplinas = []
+    resumo_disciplinas = {}
+    for resposta in respostas:
+        aluno_id = str(resposta.aluno_id)
+        disciplina = resposta.disciplina or "Sem disciplina"
+
+        if disciplina not in disciplinas:
+            disciplinas.append(disciplina)
+
+        if aluno_id not in resumo_disciplinas:
+            resumo_disciplinas[aluno_id] = {}
+
+        if disciplina not in resumo_disciplinas[aluno_id]:
+            resumo_disciplinas[aluno_id][disciplina] = {"acertos": 0, "total": 0}
+
+        resumo_disciplinas[aluno_id][disciplina]["total"] += 1
+        if resposta.acertou:
+            resumo_disciplinas[aluno_id][disciplina]["acertos"] += 1
+
+    resumo_global = {}
+    for resultado in resultados:
+        aluno_id = str(resultado.aluno_id)
+
+        if aluno_id not in resumo_global:
+            resumo_global[aluno_id] = {"acertos": 0, "total": 0}
+
+        resumo_global[aluno_id]["acertos"] += resultado.acertos
+        resumo_global[aluno_id]["total"] += resultado.total_questoes
+
+    linhas = []
+    for aluno in sorted(
+        alunos,
+        key=lambda item: (
+            turma_por_id.get(item.turma_id).nome if turma_por_id.get(item.turma_id) else "",
+            item.numero_chamada,
+            item.nome,
+        ),
+    ):
+        aluno_id = str(aluno.id)
+        turma = turma_por_id.get(aluno.turma_id)
+        global_aluno = resumo_global.get(aluno_id, {"acertos": 0, "total": 0})
+        nota_global = (
+            _calcular_nota(global_aluno["acertos"], global_aluno["total"])
+            if global_aluno["total"]
+            else None
+        )
+
+        notas_disciplinas = {}
+        for disciplina in disciplinas:
+            resumo = resumo_disciplinas.get(aluno_id, {}).get(disciplina)
+            notas_disciplinas[disciplina] = (
+                _calcular_nota(resumo["acertos"], resumo["total"]) if resumo else None
+            )
+
+        linhas.append(
+            {
+                "turma": turma.nome if turma else "",
+                "numero_chamada": aluno.numero_chamada,
+                "aluno": aluno.nome,
+                "disciplinas": notas_disciplinas,
+                "nota_global": nota_global,
+                "status": "Corrigido" if nota_global is not None else "Pendente",
+            }
+        )
+
+    return disciplinas, linhas
+
+
+@app.get("/")
+def home():
+    return {"mensagem": "Backend do Sistema de Gabarito funcionando"}
+
+
+@app.get("/teste-banco")
+def teste_banco(db: Session = Depends(get_db)):
+    resultado = db.execute(text("select nome from escolas")).fetchall()
+    escolas = [linha[0] for linha in resultado]
+
+    return {"conectado": True, "escolas": escolas}
+
+
+@app.get("/escolas")
+def listar_escolas(db: Session = Depends(get_db)):
+    return db.query(models.Escola).order_by(models.Escola.nome).all()
+
+
+@app.get("/turmas/{escola_id}")
+def listar_turmas(escola_id: str, db: Session = Depends(get_db)):
+    return (
+        db.query(models.Turma)
+        .filter(models.Turma.escola_id == escola_id)
+        .order_by(models.Turma.nome)
+        .all()
+    )
+
+
+@app.get("/alunos/{turma_id}")
+def listar_alunos(turma_id: str, db: Session = Depends(get_db)):
+    return (
+        db.query(models.Aluno)
+        .filter(models.Aluno.turma_id == turma_id)
+        .order_by(models.Aluno.numero_chamada)
+        .all()
+    )
+
+
+@app.get("/modelo-prova")
+def buscar_modelo_prova(
+    escola_id: str,
+    bimestre: int,
+    dia: int,
+    db: Session = Depends(get_db),
+):
+    modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+
+    disciplinas = (
+        db.query(models.DisciplinaProva)
+        .filter(models.DisciplinaProva.modelo_prova_id == modelo.id)
+        .order_by(models.DisciplinaProva.ordem)
+        .all()
+    )
+
+    return {"modelo": modelo, "disciplinas": disciplinas}
+
+
+@app.post("/gabarito")
+def salvar_gabarito(
+    escola_id: str = Form(...),
+    bimestre: int = Form(...),
+    dia: int = Form(...),
+    serie: int = Form(...),
+    respostas: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+
+    disciplinas = (
+        db.query(models.DisciplinaProva)
+        .filter(models.DisciplinaProva.modelo_prova_id == modelo.id)
+        .order_by(models.DisciplinaProva.ordem)
+        .all()
+    )
+
+    if not disciplinas:
+        raise HTTPException(status_code=404, detail="Disciplinas da prova nao encontradas")
+
+    respostas_lista = [_normalizar_resposta(resposta) for resposta in respostas.split(",") if resposta.strip()]
+
+    if any(resposta is None for resposta in respostas_lista):
+        raise HTTPException(status_code=400, detail="Use somente alternativas A, B, C ou D")
+
+    total_esperado = sum(disciplina.quantidade_questoes for disciplina in disciplinas)
+    if len(respostas_lista) != total_esperado:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Quantidade de respostas invalida. Esperado: {total_esperado}. Recebido: {len(respostas_lista)}.",
+        )
+
+    try:
+        (
+            db.query(models.Gabarito)
+            .filter(models.Gabarito.modelo_prova_id == modelo.id)
+            .filter(models.Gabarito.serie == serie)
+            .delete(synchronize_session=False)
+        )
+
+        numero_questao = 1
+        indice_resposta = 0
+
+        for disciplina in disciplinas:
+            for _ in range(disciplina.quantidade_questoes):
+                db.add(
+                    models.Gabarito(
+                        modelo_prova_id=modelo.id,
+                        serie=serie,
+                        numero_questao=numero_questao,
+                        disciplina=disciplina.disciplina,
+                        resposta_correta=respostas_lista[indice_resposta],
+                    )
+                )
+
+                numero_questao += 1
+                indice_resposta += 1
+
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar gabarito: {exc}") from exc
+
+    return {"mensagem": "Gabarito salvo com sucesso", "serie": serie, "total_questoes": total_esperado}
+
+
+@app.get("/gabarito")
+def buscar_gabarito(
+    escola_id: str,
+    bimestre: int,
+    dia: int,
+    serie: int,
+    db: Session = Depends(get_db),
+):
+    modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+    return _buscar_gabarito(db, modelo.id, serie)
+
+
+@app.post("/corrigir-manual")
+def corrigir_manual(
+    aluno_id: str = Form(...),
+    escola_id: str = Form(...),
+    bimestre: int = Form(...),
+    dia: int = Form(...),
+    respostas: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+    serie = _buscar_serie_aluno(db, aluno_id)
+    gabaritos = _buscar_gabarito(db, modelo.id, serie)
+    respostas_lista = [_normalizar_resposta(resposta) for resposta in respostas.split(",") if resposta.strip()]
+    respostas_detectadas = {
+        indice + 1: resposta for indice, resposta in enumerate(respostas_lista)
+    }
+
+    try:
+        acertos, respostas_salvas = _comparar_e_salvar_respostas(
+            db,
+            aluno_id,
+            modelo.id,
+            gabaritos,
+            respostas_detectadas,
+        )
+        total_questoes = len(gabaritos)
+        nota_dia = _salvar_resultado_aluno(db, aluno_id, modelo, serie, acertos, total_questoes)
+        resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar correcao: {exc}") from exc
+
+    return {
+        "mensagem": "Prova corrigida com sucesso",
+        "aluno_id": aluno_id,
+        "escola_id": escola_id,
+        "bimestre": bimestre,
+        "dia": dia,
+        "serie": serie,
+        "acertos": acertos,
+        "total_questoes": total_questoes,
+        "nota_dia": nota_dia,
+        **resumo_global,
+        "respostas_salvas": respostas_salvas,
+        "gabarito_lido_tabulado": _tabular_respostas(respostas_salvas),
+    }
+
+
+@app.post("/corrigir-foto")
+async def corrigir_foto(
+    aluno_id: str = Form(...),
+    escola_id: str = Form(...),
+    bimestre: int = Form(...),
+    dia: int = Form(...),
+    foto: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+    serie = _buscar_serie_aluno(db, aluno_id)
+    gabaritos = _buscar_gabarito(db, modelo.id, serie)
+    total_questoes = len(gabaritos)
+
+    nome_arquivo, caminho_arquivo = _salvar_upload(foto, await foto.read())
+
+    resultado_processamento, erro = processar_folha(caminho_arquivo)
+    if erro:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensagem": erro,
+                "imagem_original": nome_arquivo,
+                "modelo_prova_id": str(modelo.id),
+            },
+        )
+
+    caminho_folha = os.path.join(UPLOAD_DIR, f"folha_{nome_arquivo}")
+    caminho_threshold = os.path.join(UPLOAD_DIR, f"threshold_{nome_arquivo}")
+
+    cv2.imwrite(caminho_folha, resultado_processamento["folha"])
+    cv2.imwrite(caminho_threshold, resultado_processamento["folha_threshold"])
+
+    try:
+        respostas_detectadas, debug_respostas = ler_respostas_grade_fixa(
+            resultado_processamento["folha_threshold"],
+            total_questoes=total_questoes,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Erro ao ler respostas: {exc}") from exc
+
+    try:
+        acertos, respostas_salvas = _comparar_e_salvar_respostas(
+            db,
+            aluno_id,
+            modelo.id,
+            gabaritos,
+            respostas_detectadas,
+        )
+        nota_dia = _salvar_resultado_aluno(db, aluno_id, modelo, serie, acertos, total_questoes)
+        resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar respostas: {exc}") from exc
+
+    return {
+        "mensagem": "Prova corrigida automaticamente",
+        "aluno_id": aluno_id,
+        "escola_id": escola_id,
+        "bimestre": bimestre,
+        "dia": dia,
+        "serie": serie,
+        "imagem_original": nome_arquivo,
+        "imagem_alinhada": f"folha_{nome_arquivo}",
+        "imagem_threshold": f"threshold_{nome_arquivo}",
+        "modelo_prova_id": str(modelo.id),
+        "respostas_detectadas": respostas_detectadas,
+        "debug_respostas": debug_respostas,
+        "respostas_salvas": respostas_salvas,
+        "gabarito_lido_tabulado": _tabular_respostas(respostas_salvas),
+        "acertos": acertos,
+        "total_questoes": total_questoes,
+        "nota_dia": nota_dia,
+        **resumo_global,
+    }
+
+
+@app.post("/corrigir-foto-existente")
+def corrigir_foto_existente(
+    aluno_id: str = Form(...),
+    escola_id: str = Form(...),
+    bimestre: int = Form(...),
+    dia: int = Form(...),
+    nome_arquivo: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+    serie = _buscar_serie_aluno(db, aluno_id)
+    gabaritos = _buscar_gabarito(db, modelo.id, serie)
+    total_questoes = len(gabaritos)
+
+    nome_arquivo = os.path.basename(nome_arquivo)
+
+    if nome_arquivo.startswith(("folha_", "threshold_", "debug_", "cinza_", "bordas_")):
+        raise HTTPException(
+            status_code=400,
+            detail="Informe o nome da foto original, nao uma imagem gerada pelo processamento.",
+        )
+
+    caminho_arquivo = os.path.join(UPLOAD_DIR, nome_arquivo)
+
+    if not os.path.exists(caminho_arquivo):
+        raise HTTPException(status_code=404, detail="Imagem nao encontrada em uploads")
+
+    resultado_processamento, erro = processar_folha(caminho_arquivo)
+    if erro:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "mensagem": erro,
+                "imagem_original": nome_arquivo,
+                "modelo_prova_id": str(modelo.id),
+            },
+        )
+
+    caminho_folha = os.path.join(UPLOAD_DIR, f"folha_{nome_arquivo}")
+    caminho_threshold = os.path.join(UPLOAD_DIR, f"threshold_{nome_arquivo}")
+
+    cv2.imwrite(caminho_folha, resultado_processamento["folha"])
+    cv2.imwrite(caminho_threshold, resultado_processamento["folha_threshold"])
+
+    try:
+        respostas_detectadas, debug_respostas = ler_respostas_grade_fixa(
+            resultado_processamento["folha_threshold"],
+            total_questoes=total_questoes,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Erro ao ler respostas: {exc}") from exc
+
+    try:
+        acertos, respostas_salvas = _comparar_e_salvar_respostas(
+            db,
+            aluno_id,
+            modelo.id,
+            gabaritos,
+            respostas_detectadas,
+        )
+        nota_dia = _salvar_resultado_aluno(db, aluno_id, modelo, serie, acertos, total_questoes)
+        resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar respostas: {exc}") from exc
+
+    return {
+        "mensagem": "Imagem existente relida e prova corrigida automaticamente",
+        "aluno_id": aluno_id,
+        "escola_id": escola_id,
+        "bimestre": bimestre,
+        "dia": dia,
+        "serie": serie,
+        "imagem_original": nome_arquivo,
+        "imagem_alinhada": f"folha_{nome_arquivo}",
+        "imagem_threshold": f"threshold_{nome_arquivo}",
+        "modelo_prova_id": str(modelo.id),
+        "respostas_detectadas": respostas_detectadas,
+        "debug_respostas": debug_respostas,
+        "respostas_salvas": respostas_salvas,
+        "gabarito_lido_tabulado": _tabular_respostas(respostas_salvas),
+        "acertos": acertos,
+        "total_questoes": total_questoes,
+        "nota_dia": nota_dia,
+        **resumo_global,
+    }
+
+
+@app.get("/respostas-aluno")
+def buscar_respostas_aluno(
+    aluno_id: str,
+    escola_id: str,
+    bimestre: int,
+    dia: int,
+    db: Session = Depends(get_db),
+):
+    modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+
+    respostas = (
+        db.query(models.RespostaAluno)
+        .filter(models.RespostaAluno.aluno_id == aluno_id)
+        .filter(models.RespostaAluno.modelo_prova_id == modelo.id)
+        .order_by(models.RespostaAluno.numero_questao)
+        .all()
+    )
+
+    respostas_salvas = [_resposta_aluno_para_dict(resposta) for resposta in respostas]
+    total_questoes = len(respostas_salvas)
+    acertos = sum(1 for resposta in respostas_salvas if resposta["acertou"])
+    nota_dia = _calcular_nota(acertos, total_questoes)
+    resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
+
+    return {
+        "aluno_id": aluno_id,
+        "escola_id": escola_id,
+        "bimestre": bimestre,
+        "dia": dia,
+        "modelo_prova_id": str(modelo.id),
+        "respostas_salvas": respostas_salvas,
+        "gabarito_lido_tabulado": _tabular_respostas(respostas_salvas),
+        "acertos": acertos,
+        "total_questoes": total_questoes,
+        "nota_dia": nota_dia,
+        **resumo_global,
+    }
+
+
+@app.get("/resultados-alunos")
+def listar_resultados_alunos(
+    turma_id: str,
+    escola_id: str,
+    bimestre: int,
+    dia: int | None = None,
+    db: Session = Depends(get_db),
+):
+    modelos_query = (
+        db.query(models.ModeloProva)
+        .filter(models.ModeloProva.escola_id == escola_id)
+        .filter(models.ModeloProva.bimestre == bimestre)
+    )
+
+    if dia is not None:
+        modelos_query = modelos_query.filter(models.ModeloProva.dia == dia)
+
+    modelos = modelos_query.order_by(models.ModeloProva.dia).all()
+
+    if not modelos:
+        raise HTTPException(status_code=404, detail="Modelo de prova nao encontrado")
+
+    modelo_ids = [modelo.id for modelo in modelos]
+    dias_por_modelo = {modelo.id: modelo.dia for modelo in modelos}
+
+    alunos = (
+        db.query(models.Aluno)
+        .filter(models.Aluno.turma_id == turma_id)
+        .order_by(models.Aluno.numero_chamada)
+        .all()
+    )
+    aluno_ids = [aluno.id for aluno in alunos]
+
+    if not aluno_ids:
+        return []
+
+    resultados = (
+        db.query(models.ResultadoAluno)
+        .filter(models.ResultadoAluno.modelo_prova_id.in_(modelo_ids))
+        .filter(models.ResultadoAluno.aluno_id.in_(aluno_ids))
+        .all()
+    )
+    resultados_bimestre = (
+        db.query(models.ResultadoAluno)
+        .filter(models.ResultadoAluno.escola_id == escola_id)
+        .filter(models.ResultadoAluno.bimestre == bimestre)
+        .filter(models.ResultadoAluno.aluno_id.in_(aluno_ids))
+        .all()
+    )
+    respostas = (
+        db.query(models.RespostaAluno)
+        .filter(models.RespostaAluno.modelo_prova_id.in_(modelo_ids))
+        .filter(models.RespostaAluno.aluno_id.in_(aluno_ids))
+        .order_by(models.RespostaAluno.numero_questao)
+        .all()
+    )
+
+    respostas_por_aluno = {}
+    for resposta in respostas:
+        respostas_por_aluno.setdefault(str(resposta.aluno_id), []).append(
+            _resposta_aluno_para_dict(resposta)
+        )
+
+    linhas_por_aluno = {}
+    globais_por_aluno = {}
+    dias_por_aluno = {}
+
+    for resultado in resultados_bimestre:
+        aluno_id = str(resultado.aluno_id)
+        if aluno_id not in globais_por_aluno:
+            globais_por_aluno[aluno_id] = {
+                "acertos_global": 0,
+                "total_questoes_global": 0,
+            }
+
+        globais_por_aluno[aluno_id]["acertos_global"] += resultado.acertos
+        globais_por_aluno[aluno_id]["total_questoes_global"] += resultado.total_questoes
+
+        dia_resultado = resultado.dia
+        dias_por_aluno.setdefault(aluno_id, {})[dia_resultado] = {
+            "acertos": resultado.acertos,
+            "total_questoes": resultado.total_questoes,
+            "nota": resultado.nota_global,
+        }
+
+    for resumo in globais_por_aluno.values():
+        resumo["nota_global"] = _calcular_nota(
+            resumo["acertos_global"],
+            resumo["total_questoes_global"],
+        )
+
+    for resultado in resultados:
+        aluno_id = str(resultado.aluno_id)
+        resumo_global = globais_por_aluno.get(
+            aluno_id,
+            {
+                "acertos_global": resultado.acertos,
+                "total_questoes_global": resultado.total_questoes,
+                "nota_global": resultado.nota_global,
+            },
+        )
+        acertos_linha = resultado.acertos if dia is not None else resumo_global["acertos_global"]
+        total_linha = resultado.total_questoes if dia is not None else resumo_global["total_questoes_global"]
+        linhas_por_aluno[aluno_id] = {
+            "aluno_id": aluno_id,
+            "modelo_prova_id": str(resultado.modelo_prova_id),
+            "escola_id": str(resultado.escola_id),
+            "bimestre": resultado.bimestre,
+            "dia": resultado.dia,
+            "serie": resultado.serie,
+            "acertos": acertos_linha,
+            "total_questoes": total_linha,
+            "nota_dia": resultado.nota_global if dia is not None else None,
+            **resumo_global,
+            "resultados_dias": dias_por_aluno.get(aluno_id, {}),
+            "respostas_salvas": respostas_por_aluno.get(aluno_id, []),
+        }
+
+    for aluno_id, respostas_salvas in respostas_por_aluno.items():
+        if aluno_id in linhas_por_aluno:
+            continue
+
+        total_questoes = len(respostas_salvas)
+        acertos = sum(1 for resposta in respostas_salvas if resposta["acertou"])
+        resumo_global = globais_por_aluno.get(
+            aluno_id,
+            {
+                "acertos_global": acertos,
+                "total_questoes_global": total_questoes,
+                "nota_global": _calcular_nota(acertos, total_questoes),
+            },
+        )
+        linhas_por_aluno[aluno_id] = {
+            "aluno_id": aluno_id,
+            "modelo_prova_id": ",".join(str(modelo_id) for modelo_id in modelo_ids),
+            "escola_id": escola_id,
+            "bimestre": bimestre,
+            "dia": dia,
+            "serie": None,
+            "acertos": acertos,
+            "total_questoes": total_questoes,
+            "nota_dia": _calcular_nota(acertos, total_questoes),
+            **resumo_global,
+            "resultados_dias": dias_por_aluno.get(aluno_id, {}),
+            "respostas_salvas": respostas_salvas,
+        }
+
+    return [
+        linhas_por_aluno[str(aluno.id)]
+        for aluno in alunos
+        if str(aluno.id) in linhas_por_aluno
+    ]
+
+
+@app.get("/resultado-final-excel")
+def baixar_resultado_final_excel(
+    escola_id: str,
+    bimestre: int,
+    db: Session = Depends(get_db),
+):
+    escola = db.query(models.Escola).filter(models.Escola.id == escola_id).first()
+    if not escola:
+        raise HTTPException(status_code=404, detail="Escola nao encontrada")
+
+    disciplinas, linhas = _montar_resultado_final_escola(db, escola_id, bimestre)
+    arquivo = StringIO()
+    arquivo.write("\ufeff")
+    arquivo.write(";".join(["Turma", "Nº", "Aluno", *disciplinas, "Nota global", "Status"]))
+    arquivo.write("\n")
+
+    for linha in linhas:
+        valores = [
+            linha["turma"],
+            str(linha["numero_chamada"]),
+            linha["aluno"],
+            *[_formatar_nota_csv(linha["disciplinas"].get(disciplina)) for disciplina in disciplinas],
+            _formatar_nota_csv(linha["nota_global"]),
+            linha["status"],
+        ]
+        arquivo.write(";".join(_celula_csv(valor) for valor in valores))
+        arquivo.write("\n")
+
+    arquivo.seek(0)
+    nome_arquivo = f"resultado_final_{bimestre}_bimestre.csv"
+
+    return StreamingResponse(
+        iter([arquivo.getvalue()]),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'},
+    )
+
+
+@app.get("/resultados")
+def resultados(
+    escola: str | None = None,
+    turma: str | None = None,
+    db: Session = Depends(get_db),
+):
+    sql = """
+        select *
+        from vw_resultado_final
+        where (:escola is null or escola = :escola)
+        and (:turma is null or turma = :turma)
+        order by turma, numero_chamada
+    """
+
+    resultado = db.execute(text(sql), {"escola": escola, "turma": turma}).mappings().all()
+    return list(resultado)
