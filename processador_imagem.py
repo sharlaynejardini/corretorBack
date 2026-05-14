@@ -132,6 +132,14 @@ def detectar_bolhas(folha_threshold):
     return sorted(bolhas, key=lambda bolha: (bolha[1], bolha[0]))
 
 
+def _distribuir_centros(largura, quantidade, inicio, fim):
+    if quantidade == 1:
+        return [int(largura * inicio)]
+
+    passo = (fim - inicio) / (quantidade - 1)
+    return [int(largura * (inicio + indice * passo)) for indice in range(quantidade)]
+
+
 def _centros_questoes(largura, total_questoes):
     if total_questoes == 22:
         grupos = [
@@ -139,13 +147,6 @@ def _centros_questoes(largura, total_questoes):
             (4, 0.462, 0.582),
             (4, 0.662, 0.782),
             (4, 0.862, 0.982),
-        ]
-    elif total_questoes == 30:
-        grupos = [
-            (12, 0.022, 0.380),
-            (6, 0.462, 0.622),
-            (6, 0.662, 0.822),
-            (6, 0.862, 0.982),
         ]
     else:
         margem = 0.035
@@ -155,14 +156,7 @@ def _centros_questoes(largura, total_questoes):
     centros = []
 
     for quantidade, inicio, fim in grupos:
-        if quantidade == 1:
-            centros.append(int(largura * inicio))
-            continue
-
-        passo = (fim - inicio) / (quantidade - 1)
-
-        for indice in range(quantidade):
-            centros.append(int(largura * (inicio + indice * passo)))
+        centros.extend(_distribuir_centros(largura, quantidade, inicio, fim))
 
     return centros
 
@@ -174,6 +168,58 @@ def _linhas_alternativas(altura):
         "C": int(altura * 0.795),
         "D": int(altura * 0.935),
     }
+
+
+def _linhas_takaoka(altura, topo=True):
+    if topo:
+        proporcoes = {
+            "A": 0.300,
+            "B": 0.360,
+            "C": 0.420,
+            "D": 0.480,
+        }
+    else:
+        proporcoes = {
+            "A": 0.695,
+            "B": 0.755,
+            "C": 0.815,
+            "D": 0.875,
+        }
+
+    return {
+        alternativa: int(altura * proporcao)
+        for alternativa, proporcao in proporcoes.items()
+    }
+
+
+def _grade_questoes(largura, altura, total_questoes):
+    if total_questoes != 30:
+        linhas = _linhas_alternativas(altura)
+        return [
+            {"questao": indice, "x": x, "linhas": linhas, "bloco": "padrao"}
+            for indice, x in enumerate(_centros_questoes(largura, total_questoes), start=1)
+        ]
+
+    blocos = [
+        (1, 12, 0.072, 0.602, _linhas_takaoka(altura, topo=True), "topo_esquerda"),
+        (13, 6, 0.692, 0.928, _linhas_takaoka(altura, topo=True), "topo_direita"),
+        (19, 6, 0.168, 0.409, _linhas_takaoka(altura, topo=False), "baixo_esquerda"),
+        (25, 6, 0.598, 0.834, _linhas_takaoka(altura, topo=False), "baixo_direita"),
+    ]
+    grade = []
+
+    for questao_inicial, quantidade, inicio, fim, linhas, bloco in blocos:
+        for deslocamento, x in enumerate(_distribuir_centros(largura, quantidade, inicio, fim)):
+            grade.append(
+                {
+                    "questao": questao_inicial + deslocamento,
+                    "x": x,
+                    "linhas": linhas,
+                    "bloco": bloco,
+                }
+            )
+
+    return grade
 
 
 def ler_respostas_grade_fixa(folha_threshold, total_questoes=22):
@@ -191,16 +237,18 @@ def ler_respostas_grade_fixa(folha_threshold, total_questoes=22):
         raise ValueError("A leitura espera uma imagem threshold em escala de cinza")
 
     altura, largura = folha_threshold.shape
-    linhas = _linhas_alternativas(altura)
-    xs = _centros_questoes(largura, total_questoes)
+    grade = _grade_questoes(largura, altura, total_questoes)
 
     respostas = {}
     debug = []
 
     raio_x = max(int(largura * 0.012), 8)
-    raio_y = max(int(altura * 0.045), 8)
+    raio_y = max(int(altura * (0.022 if total_questoes == 30 else 0.045)), 8)
 
-    for indice, x in enumerate(xs, start=1):
+    for item in grade:
+        questao = item["questao"]
+        x = item["x"]
+        linhas = item["linhas"]
         melhor_alternativa = None
         maior_pixels = -1
         contagens = {}
@@ -232,18 +280,20 @@ def ler_respostas_grade_fixa(folha_threshold, total_questoes=22):
         diferenca = maior_pixels - segundo_maior
         confianca = round(maior_pixels / max(segundo_maior, 1), 2)
 
-        respostas[indice] = melhor_alternativa
+        respostas[questao] = melhor_alternativa
 
         debug.append(
             {
-                "questao": indice,
+                "questao": questao,
                 "resposta": melhor_alternativa,
+                "bloco": item["bloco"],
                 "contagens": contagens,
                 "maior_pixels": maior_pixels,
                 "segundo_maior_pixels": segundo_maior,
                 "diferenca_pixels": diferenca,
                 "confianca": confianca,
                 "centro_x": x,
+                "centros_y": linhas,
                 "regioes": regioes,
             }
         )
