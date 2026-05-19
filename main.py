@@ -1,6 +1,7 @@
 import os
 import uuid
 from io import StringIO
+from contextlib import asynccontextmanager
 
 import cv2
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
@@ -15,12 +16,31 @@ from database import engine, get_db
 from processador_imagem import ler_respostas_grade_fixa, processar_folha
 
 
-UPLOAD_DIR = "uploads"
+UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads" if os.getenv("VERCEL") else "uploads")
 ALTERNATIVAS_VALIDAS = {"A", "B", "C", "D"}
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-app = FastAPI(title="Sistema de Correcao de Gabaritos")
+
+def _inicializar_banco():
+    if engine is None:
+        print("DATABASE_URL nao configurada; inicializacao do banco ignorada.")
+        return
+
+    try:
+        models.Base.metadata.create_all(bind=engine)
+        _preparar_banco()
+    except SQLAlchemyError as exc:
+        print(f"Erro ao inicializar banco: {exc}")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _inicializar_banco()
+    yield
+
+
+app = FastAPI(title="Sistema de Correcao de Gabaritos", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -34,8 +54,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-models.Base.metadata.create_all(bind=engine)
 
 
 def _preparar_banco():
