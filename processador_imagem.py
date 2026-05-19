@@ -48,7 +48,62 @@ def transformar_perspectiva(imagem, pontos):
     return imagem_corrigida
 
 
-def processar_folha(caminho_arquivo):
+def _limiarizar_folha(folha):
+    folha_cinza = cv2.cvtColor(folha, cv2.COLOR_BGR2GRAY)
+    folha_cinza = cv2.GaussianBlur(folha_cinza, (3, 3), 0)
+
+    folha_threshold = cv2.threshold(
+        folha_cinza,
+        0,
+        255,
+        cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU,
+    )[1]
+
+    return folha_cinza, folha_threshold
+
+
+def _mascara_marcacoes_azuis(folha):
+    hsv = cv2.cvtColor(folha, cv2.COLOR_BGR2HSV)
+    mascara = cv2.inRange(
+        hsv,
+        np.array([80, 25, 20]),
+        np.array([140, 255, 255]),
+    )
+    return cv2.morphologyEx(mascara, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+
+
+def _recortar_gabarito_takaoka(imagem, bordas):
+    contornos = cv2.findContours(
+        bordas.copy(),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    contornos = imutils.grab_contours(contornos)
+
+    candidatos = []
+
+    for contorno in contornos:
+        x, y, w, h = cv2.boundingRect(contorno)
+        area = cv2.contourArea(contorno)
+        proporcao = w / float(h)
+
+        if area > 10000 and h > 250 and 1.6 <= proporcao <= 2.4:
+            candidatos.append((area, x, y, w, h))
+
+    if not candidatos:
+        return None
+
+    _, x, y, w, h = max(candidatos, key=lambda item: item[0])
+    margem = 4
+    y1 = max(y - margem, 0)
+    x1 = max(x - margem, 0)
+    y2 = min(y + h + margem, imagem.shape[0])
+    x2 = min(x + w + margem, imagem.shape[1])
+
+    return imagem[y1:y2, x1:x2]
+
+
+def processar_folha(caminho_arquivo, total_questoes=None):
     imagem = cv2.imread(caminho_arquivo)
 
     if imagem is None:
@@ -61,6 +116,22 @@ def processar_folha(caminho_arquivo):
         cinza = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(cinza, (5, 5), 0)
         bordas = cv2.Canny(blur, 75, 200)
+
+        if total_questoes == 30:
+            folha = _recortar_gabarito_takaoka(original, bordas)
+
+            if folha is not None:
+                folha_cinza, folha_threshold = _limiarizar_folha(folha)
+                mascara_azul = _mascara_marcacoes_azuis(folha)
+
+                if cv2.countNonZero(mascara_azul) > 200:
+                    folha_threshold = mascara_azul
+
+                return {
+                    "folha": folha,
+                    "folha_cinza": folha_cinza,
+                    "folha_threshold": folha_threshold,
+                }, None
 
         contornos = cv2.findContours(
             bordas.copy(),
@@ -86,16 +157,7 @@ def processar_folha(caminho_arquivo):
 
         pontos = folha_contorno.reshape(4, 2)
         folha = transformar_perspectiva(original, pontos)
-
-        folha_cinza = cv2.cvtColor(folha, cv2.COLOR_BGR2GRAY)
-        folha_cinza = cv2.GaussianBlur(folha_cinza, (3, 3), 0)
-
-        folha_threshold = cv2.threshold(
-            folha_cinza,
-            0,
-            255,
-            cv2.THRESH_BINARY_INV | cv2.THRESH_OTSU,
-        )[1]
+        folha_cinza, folha_threshold = _limiarizar_folha(folha)
 
         return {
             "folha": folha,
@@ -192,63 +254,76 @@ def _linhas_takaoka(altura, topo=True):
     }
 
 
-def _grade_questoes(largura, altura, total_questoes):
+def _grade_questoes(largura, altura, total_questoes, ajuste_x=0, ajuste_y=0, escala_x=1.0, escala_y=1.0):
     if total_questoes != 30:
         linhas = _linhas_alternativas(altura)
         return [
-            {"questao": indice, "x": x, "linhas": linhas, "bloco": "padrao"}
+            {
+                "questao": indice,
+                "x": min(max(int((x - (largura / 2)) * escala_x + (largura / 2) + ajuste_x), 0), largura - 1),
+                "linhas": {
+                    alternativa: min(max(int((y - (altura / 2)) * escala_y + (altura / 2) + ajuste_y), 0), altura - 1)
+                    for alternativa, y in linhas.items()
+                },
+                "bloco": "padrao",
+            }
             for indice, x in enumerate(_centros_questoes(largura, total_questoes), start=1)
         ]
 
     blocos = [
-        (1, 12, 0.072, 0.602, _linhas_takaoka(altura, topo=True), "topo_esquerda"),
-        (13, 6, 0.692, 0.928, _linhas_takaoka(altura, topo=True), "topo_direita"),
-        (19, 6, 0.168, 0.409, _linhas_takaoka(altura, topo=False), "baixo_esquerda"),
-        (25, 6, 0.598, 0.834, _linhas_takaoka(altura, topo=False), "baixo_direita"),
+        (1, 12, 0.075, 0.600, [0.285, 0.346, 0.402, 0.464], "portugues"),
+        (13, 6, 0.693, 0.931, [0.285, 0.346, 0.402, 0.464], "historia"),
+        (19, 6, 0.174, 0.414, [0.705, 0.775, 0.834, 0.899], "geografia"),
+        (25, 6, 0.600, 0.841, [0.705, 0.759, 0.829, 0.899], "ed_fisica"),
     ]
     grade = []
 
     for questao_inicial, quantidade, inicio, fim, linhas, bloco in blocos:
+        passo = (fim - inicio) / max(quantidade - 1, 1)
+        raio_x = max(int(largura * passo * 0.40), 6)
+        raio_y = max(int(altura * 0.035), 6)
+        centros_y_base = {
+            alternativa: altura * proporcao
+            for alternativa, proporcao in zip(("A", "B", "C", "D"), linhas)
+        }
+
         for deslocamento, x in enumerate(_distribuir_centros(largura, quantidade, inicio, fim)):
+            x_ajustado = int((x - (largura / 2)) * escala_x + (largura / 2) + ajuste_x)
+            centros_y = {
+                alternativa: min(
+                    max(int((y - (altura / 2)) * escala_y + (altura / 2) + ajuste_y), 0),
+                    altura - 1,
+                )
+                for alternativa, y in centros_y_base.items()
+            }
+
             grade.append(
                 {
                     "questao": questao_inicial + deslocamento,
-                    "x": x,
-                    "linhas": linhas,
+                    "x": min(max(x_ajustado, 0), largura - 1),
+                    "linhas": centros_y,
                     "bloco": bloco,
+                    "raio_x": raio_x,
+                    "raio_y": raio_y,
                 }
             )
 
     return grade
 
 
-def ler_respostas_grade_fixa(folha_threshold, total_questoes=22):
-    """
-    Le respostas de uma grade fixa com alternativas A/B/C/D.
-
-    O total de questoes deve vir do gabarito oficial:
-    - 22 para EMEF DEP. AGENOR LINO DE MATTOS
-    - 30 para EMEF YOJIRO TAKAOKA
-    """
-    if folha_threshold is None:
-        raise ValueError("Imagem threshold nao informada")
-
-    if len(folha_threshold.shape) != 2:
-        raise ValueError("A leitura espera uma imagem threshold em escala de cinza")
-
+def _ler_grade(folha_threshold, total_questoes, grade):
     altura, largura = folha_threshold.shape
-    grade = _grade_questoes(largura, altura, total_questoes)
-
+    raio_x_padrao = max(int(largura * 0.012), 8)
+    raio_y_padrao = max(int(altura * 0.045), 8)
     respostas = {}
     debug = []
-
-    raio_x = max(int(largura * 0.012), 8)
-    raio_y = max(int(altura * (0.022 if total_questoes == 30 else 0.045)), 8)
 
     for item in grade:
         questao = item["questao"]
         x = item["x"]
         linhas = item["linhas"]
+        raio_x = item.get("raio_x", raio_x_padrao)
+        raio_y = item.get("raio_y", raio_y_padrao)
         melhor_alternativa = None
         maior_pixels = -1
         contagens = {}
@@ -299,3 +374,77 @@ def ler_respostas_grade_fixa(folha_threshold, total_questoes=22):
         )
 
     return respostas, debug
+
+
+def _pontuar_debug(debug):
+    confiancas = [item["confianca"] for item in debug]
+    diferencas = [item["diferenca_pixels"] for item in debug]
+    positivos = sum(1 for item in debug if item["maior_pixels"] > 0)
+
+    return (
+        positivos * 1000
+        + sum(min(confianca, 8) for confianca in confiancas)
+        + sum(max(diferenca, 0) for diferenca in diferencas) / 100
+    )
+
+
+def _ler_grade_com_tentativas(folha_threshold, total_questoes):
+    altura, largura = folha_threshold.shape
+
+    if total_questoes != 30:
+        grade = _grade_questoes(largura, altura, total_questoes)
+        return _ler_grade(folha_threshold, total_questoes, grade)
+
+    melhor = None
+    deslocamentos_x = [0, -8, 8, -14, 14]
+    deslocamentos_y = [0, -6, 6, -10, 10]
+    escalas_x = [1.0, 0.985, 1.015]
+    escalas_y = [1.0, 0.985, 1.015]
+
+    for ajuste_x in deslocamentos_x:
+        for ajuste_y in deslocamentos_y:
+            for escala_x in escalas_x:
+                for escala_y in escalas_y:
+                    grade = _grade_questoes(
+                        largura,
+                        altura,
+                        total_questoes,
+                        ajuste_x=ajuste_x,
+                        ajuste_y=ajuste_y,
+                        escala_x=escala_x,
+                        escala_y=escala_y,
+                    )
+                    respostas, debug = _ler_grade(folha_threshold, total_questoes, grade)
+                    pontuacao = _pontuar_debug(debug)
+
+                    if melhor is None or pontuacao > melhor[0]:
+                        melhor = (pontuacao, respostas, debug, ajuste_x, ajuste_y, escala_x, escala_y)
+
+    _, respostas, debug, ajuste_x, ajuste_y, escala_x, escala_y = melhor
+
+    for item in debug:
+        item["tentativa_grade"] = {
+            "ajuste_x": ajuste_x,
+            "ajuste_y": ajuste_y,
+            "escala_x": escala_x,
+            "escala_y": escala_y,
+        }
+
+    return respostas, debug
+
+
+def ler_respostas_grade_fixa(folha_threshold, total_questoes=22):
+    """
+    Le respostas de uma grade fixa com alternativas A/B/C/D.
+
+    O total de questoes deve vir do gabarito oficial:
+    - 22 para EMEF DEP. AGENOR LINO DE MATTOS
+    - 30 para EMEF YOJIRO TAKAOKA
+    """
+    if folha_threshold is None:
+        raise ValueError("Imagem threshold nao informada")
+
+    if len(folha_threshold.shape) != 2:
+        raise ValueError("A leitura espera uma imagem threshold em escala de cinza")
+
+    return _ler_grade_com_tentativas(folha_threshold, total_questoes)

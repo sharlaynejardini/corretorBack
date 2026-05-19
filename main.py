@@ -758,6 +758,16 @@ def corrigir_manual(
     serie, codigo_gabarito = _buscar_contexto_aluno(db, aluno_id, modelo)
     gabaritos = _buscar_gabarito(db, modelo.id, serie, codigo_gabarito)
     respostas_lista = [_normalizar_resposta(resposta) for resposta in respostas.split(",") if resposta.strip()]
+
+    if any(resposta is None for resposta in respostas_lista):
+        raise HTTPException(status_code=400, detail="Use somente alternativas A, B, C ou D")
+
+    if len(respostas_lista) != len(gabaritos):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Quantidade de respostas invalida. Esperado: {len(gabaritos)}. Recebido: {len(respostas_lista)}.",
+        )
+
     respostas_detectadas = {
         indice + 1: resposta for indice, resposta in enumerate(respostas_lista)
     }
@@ -819,7 +829,7 @@ async def corrigir_foto(
 
     nome_arquivo, caminho_arquivo = _salvar_upload(foto, await foto.read())
 
-    resultado_processamento, erro = processar_folha(caminho_arquivo)
+    resultado_processamento, erro = processar_folha(caminho_arquivo, total_questoes=total_questoes)
     if erro:
         raise HTTPException(
             status_code=422,
@@ -917,7 +927,7 @@ def corrigir_foto_existente(
     if not os.path.exists(caminho_arquivo):
         raise HTTPException(status_code=404, detail="Imagem nao encontrada em uploads")
 
-    resultado_processamento, erro = processar_folha(caminho_arquivo)
+    resultado_processamento, erro = processar_folha(caminho_arquivo, total_questoes=total_questoes)
     if erro:
         raise HTTPException(
             status_code=422,
