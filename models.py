@@ -54,12 +54,19 @@ class DisciplinaProva(Base):
 class Gabarito(Base):
     __tablename__ = "gabaritos"
     __table_args__ = (
-        UniqueConstraint("modelo_prova_id", "serie", "numero_questao", name="uq_gabaritos_modelo_serie_questao"),
+        UniqueConstraint(
+            "modelo_prova_id",
+            "serie",
+            "codigo_gabarito",
+            "numero_questao",
+            name="uq_gabaritos_modelo_serie_codigo_questao",
+        ),
     )
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     modelo_prova_id = Column(UUID(as_uuid=True), ForeignKey("modelos_prova.id"))
     serie = Column(Integer, nullable=False)
+    codigo_gabarito = Column(String, nullable=False, default="PADRAO")
     numero_questao = Column(Integer, nullable=False)
     disciplina = Column(String, nullable=False)
     resposta_correta = Column(String, nullable=False)
@@ -92,6 +99,7 @@ class ResultadoAluno(Base):
     bimestre = Column(Integer, nullable=False)
     dia = Column(Integer, nullable=False)
     serie = Column(Integer, nullable=False)
+    codigo_gabarito = Column(String, nullable=False, default="PADRAO")
     acertos = Column(Integer, nullable=False)
     total_questoes = Column(Integer, nullable=False)
     nota_global = Column(Float, nullable=False)

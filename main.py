@@ -1,6 +1,7 @@
 import os
+import unicodedata
 import uuid
-from io import StringIO
+from io import BytesIO
 from contextlib import asynccontextmanager
 
 import cv2
@@ -18,6 +19,7 @@ from processador_imagem import ler_respostas_grade_fixa, processar_folha
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads" if os.getenv("VERCEL") else "uploads")
 ALTERNATIVAS_VALIDAS = {"A", "B", "C", "D"}
+GABARITO_PADRAO = "PADRAO"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -69,16 +71,40 @@ def _preparar_banco():
         conn.execute(
             text(
                 """
+                alter table if exists gabaritos
+                drop constraint if exists uq_gabaritos_modelo_serie_questao
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                alter table if exists gabaritos
+                add column if not exists codigo_gabarito varchar not null default 'PADRAO'
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                alter table if exists resultados_alunos
+                add column if not exists codigo_gabarito varchar not null default 'PADRAO'
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
                 do $$
                 begin
                     if not exists (
                         select 1
                         from pg_constraint
-                        where conname = 'uq_gabaritos_modelo_serie_questao'
+                        where conname = 'uq_gabaritos_modelo_serie_codigo_questao'
                     ) then
                         alter table gabaritos
-                        add constraint uq_gabaritos_modelo_serie_questao
-                        unique (modelo_prova_id, serie, numero_questao);
+                        add constraint uq_gabaritos_modelo_serie_codigo_questao
+                        unique (modelo_prova_id, serie, codigo_gabarito, numero_questao);
                     end if;
                 end $$;
                 """
@@ -112,7 +138,32 @@ def _extrair_serie_turma(nome_turma: str):
     return int(digitos) if digitos else None
 
 
-def _buscar_serie_aluno(db: Session, aluno_id: str):
+def _normalizar_texto(valor: str):
+    texto = unicodedata.normalize("NFKD", valor or "")
+    texto = "".join(caractere for caractere in texto if not unicodedata.combining(caractere))
+    return texto.upper()
+
+
+def _codigo_gabarito_turma(nome_escola: str, nome_turma: str, serie: int, dia: int):
+    escola_normalizada = _normalizar_texto(nome_escola)
+    turma_normalizada = _normalizar_texto(nome_turma).replace(" ", "")
+
+    if "TAKAOKA" in escola_normalizada and serie == 8 and dia == 1:
+        if "8B" in turma_normalizada:
+            return "8B"
+
+        if "8A" in turma_normalizada or "8C" in turma_normalizada:
+            return "8AC"
+
+    return GABARITO_PADRAO
+
+
+def _normalizar_codigo_gabarito(codigo: str | None):
+    codigo = (codigo or GABARITO_PADRAO).strip().upper()
+    return codigo or GABARITO_PADRAO
+
+
+def _buscar_contexto_aluno(db: Session, aluno_id: str, modelo):
     aluno = db.query(models.Aluno).filter(models.Aluno.id == aluno_id).first()
 
     if not aluno:
@@ -124,20 +175,33 @@ def _buscar_serie_aluno(db: Session, aluno_id: str):
     if not serie:
         raise HTTPException(status_code=400, detail="Nao consegui identificar a serie do aluno")
 
-    return serie
+    escola = db.query(models.Escola).filter(models.Escola.id == modelo.escola_id).first()
+    codigo_gabarito = _codigo_gabarito_turma(
+        escola.nome if escola else "",
+        turma.nome if turma else "",
+        serie,
+        modelo.dia,
+    )
+
+    return serie, codigo_gabarito
 
 
-def _buscar_gabarito(db: Session, modelo_id, serie: int):
+def _buscar_gabarito(db: Session, modelo_id, serie: int, codigo_gabarito: str = GABARITO_PADRAO):
+    codigo_gabarito = _normalizar_codigo_gabarito(codigo_gabarito)
     gabaritos = (
         db.query(models.Gabarito)
         .filter(models.Gabarito.modelo_prova_id == modelo_id)
         .filter(models.Gabarito.serie == serie)
+        .filter(models.Gabarito.codigo_gabarito == codigo_gabarito)
         .order_by(models.Gabarito.numero_questao)
         .all()
     )
 
     if not gabaritos:
-        raise HTTPException(status_code=404, detail=f"Gabarito oficial da serie {serie} nao encontrado")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Gabarito oficial da serie {serie} ({codigo_gabarito}) nao encontrado",
+        )
 
     return gabaritos
 
@@ -233,11 +297,12 @@ def _calcular_nota_global_bimestre(db: Session, aluno_id: str, escola_id: str, b
     )
     acertos = sum(resultado.acertos for resultado in resultados)
     total_questoes = sum(resultado.total_questoes for resultado in resultados)
+    notas = [resultado.nota_global for resultado in resultados if resultado.nota_global is not None]
 
     return {
         "acertos_global": acertos,
         "total_questoes_global": total_questoes,
-        "nota_global": _calcular_nota(acertos, total_questoes),
+        "nota_global": round(sum(notas) / len(notas), 1) if notas else _calcular_nota(acertos, total_questoes),
     }
 
 
@@ -246,6 +311,7 @@ def _salvar_resultado_aluno(
     aluno_id: str,
     modelo,
     serie: int,
+    codigo_gabarito: str,
     acertos: int,
     total_questoes: int,
 ):
@@ -266,6 +332,7 @@ def _salvar_resultado_aluno(
             bimestre=modelo.bimestre,
             dia=modelo.dia,
             serie=serie,
+            codigo_gabarito=codigo_gabarito,
             acertos=acertos,
             total_questoes=total_questoes,
             nota_global=nota_dia,
@@ -276,6 +343,7 @@ def _salvar_resultado_aluno(
         resultado.bimestre = modelo.bimestre
         resultado.dia = modelo.dia
         resultado.serie = serie
+        resultado.codigo_gabarito = codigo_gabarito
         resultado.acertos = acertos
         resultado.total_questoes = total_questoes
         resultado.nota_global = nota_dia
@@ -336,15 +404,69 @@ def _resposta_aluno_para_dict(resposta):
     }
 
 
-def _formatar_nota_csv(valor):
-    if valor is None:
-        return ""
-
-    return str(valor).replace(".", ",")
+def _valor_planilha(valor):
+    return "" if valor is None else valor
 
 
-def _celula_csv(valor):
-    return f'"{str(valor).replace(chr(34), chr(34) + chr(34))}"'
+def _montar_excel_resultado_final(escola_nome: str, bimestre: int, disciplinas, linhas):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    workbook = Workbook()
+    planilha = workbook.active
+    planilha.title = "Resultado final"
+
+    cabecalho = [
+        "Turma",
+        "Nº",
+        "Aluno",
+        *disciplinas,
+        "Nota dia 1",
+        "Nota dia 2",
+        "Nota global",
+        "Status",
+    ]
+    planilha.append([f"Resultado final - {escola_nome} - {bimestre}º bimestre"])
+    planilha.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(cabecalho))
+    planilha.append(cabecalho)
+
+    for linha in linhas:
+        planilha.append(
+            [
+                linha["turma"],
+                linha["numero_chamada"],
+                linha["aluno"],
+                *[_valor_planilha(linha["disciplinas"].get(disciplina)) for disciplina in disciplinas],
+                _valor_planilha(linha.get("nota_dia_1")),
+                _valor_planilha(linha.get("nota_dia_2")),
+                _valor_planilha(linha["nota_global"]),
+                linha["status"],
+            ]
+        )
+
+    titulo = planilha[1][0]
+    titulo.font = Font(bold=True, size=14)
+    titulo.alignment = Alignment(horizontal="center")
+
+    preenchimento_cabecalho = PatternFill("solid", fgColor="D9EAF7")
+    for celula in planilha[2]:
+        celula.font = Font(bold=True)
+        celula.fill = preenchimento_cabecalho
+        celula.alignment = Alignment(horizontal="center")
+
+    for coluna in planilha.columns:
+        largura = max(len(str(celula.value or "")) for celula in coluna) + 2
+        planilha.column_dimensions[get_column_letter(coluna[0].column)].width = min(max(largura, 12), 34)
+
+    for linha in planilha.iter_rows(min_row=3):
+        for celula in linha:
+            celula.alignment = Alignment(vertical="center")
+
+    arquivo = BytesIO()
+    workbook.save(arquivo)
+    arquivo.seek(0)
+    return arquivo
 
 
 def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
@@ -420,10 +542,12 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
         aluno_id = str(resultado.aluno_id)
 
         if aluno_id not in resumo_global:
-            resumo_global[aluno_id] = {"acertos": 0, "total": 0}
+            resumo_global[aluno_id] = {"acertos": 0, "total": 0, "notas": []}
 
         resumo_global[aluno_id]["acertos"] += resultado.acertos
         resumo_global[aluno_id]["total"] += resultado.total_questoes
+        if resultado.nota_global is not None:
+            resumo_global[aluno_id]["notas"].append(resultado.nota_global)
 
     linhas = []
     for aluno in sorted(
@@ -437,8 +561,11 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
         aluno_id = str(aluno.id)
         turma = turma_por_id.get(aluno.turma_id)
         global_aluno = resumo_global.get(aluno_id, {"acertos": 0, "total": 0})
+        notas_aluno = global_aluno.get("notas", [])
         nota_global = (
-            _calcular_nota(global_aluno["acertos"], global_aluno["total"])
+            round(sum(notas_aluno) / len(notas_aluno), 1)
+            if notas_aluno
+            else _calcular_nota(global_aluno["acertos"], global_aluno["total"])
             if global_aluno["total"]
             else None
         )
@@ -457,6 +584,14 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
                 "aluno": aluno.nome,
                 "disciplinas": notas_disciplinas,
                 "nota_global": nota_global,
+                "nota_dia_1": next(
+                    (resultado.nota_global for resultado in resultados if str(resultado.aluno_id) == aluno_id and resultado.dia == 1),
+                    None,
+                ),
+                "nota_dia_2": next(
+                    (resultado.nota_global for resultado in resultados if str(resultado.aluno_id) == aluno_id and resultado.dia == 2),
+                    None,
+                ),
                 "status": "Corrigido" if nota_global is not None else "Pendente",
             }
         )
@@ -527,10 +662,12 @@ def salvar_gabarito(
     bimestre: int = Form(...),
     dia: int = Form(...),
     serie: int = Form(...),
+    codigo_gabarito: str = Form(GABARITO_PADRAO),
     respostas: str = Form(...),
     db: Session = Depends(get_db),
 ):
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+    codigo_gabarito = _normalizar_codigo_gabarito(codigo_gabarito)
 
     disciplinas = (
         db.query(models.DisciplinaProva)
@@ -559,6 +696,7 @@ def salvar_gabarito(
             db.query(models.Gabarito)
             .filter(models.Gabarito.modelo_prova_id == modelo.id)
             .filter(models.Gabarito.serie == serie)
+            .filter(models.Gabarito.codigo_gabarito == codigo_gabarito)
             .delete(synchronize_session=False)
         )
 
@@ -571,6 +709,7 @@ def salvar_gabarito(
                     models.Gabarito(
                         modelo_prova_id=modelo.id,
                         serie=serie,
+                        codigo_gabarito=codigo_gabarito,
                         numero_questao=numero_questao,
                         disciplina=disciplina.disciplina,
                         resposta_correta=respostas_lista[indice_resposta],
@@ -585,7 +724,12 @@ def salvar_gabarito(
         db.rollback()
         raise HTTPException(status_code=500, detail=f"Erro ao salvar gabarito: {exc}") from exc
 
-    return {"mensagem": "Gabarito salvo com sucesso", "serie": serie, "total_questoes": total_esperado}
+    return {
+        "mensagem": "Gabarito salvo com sucesso",
+        "serie": serie,
+        "codigo_gabarito": codigo_gabarito,
+        "total_questoes": total_esperado,
+    }
 
 
 @app.get("/gabarito")
@@ -594,10 +738,11 @@ def buscar_gabarito(
     bimestre: int,
     dia: int,
     serie: int,
+    codigo_gabarito: str = GABARITO_PADRAO,
     db: Session = Depends(get_db),
 ):
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
-    return _buscar_gabarito(db, modelo.id, serie)
+    return _buscar_gabarito(db, modelo.id, serie, codigo_gabarito)
 
 
 @app.post("/corrigir-manual")
@@ -610,8 +755,8 @@ def corrigir_manual(
     db: Session = Depends(get_db),
 ):
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
-    serie = _buscar_serie_aluno(db, aluno_id)
-    gabaritos = _buscar_gabarito(db, modelo.id, serie)
+    serie, codigo_gabarito = _buscar_contexto_aluno(db, aluno_id, modelo)
+    gabaritos = _buscar_gabarito(db, modelo.id, serie, codigo_gabarito)
     respostas_lista = [_normalizar_resposta(resposta) for resposta in respostas.split(",") if resposta.strip()]
     respostas_detectadas = {
         indice + 1: resposta for indice, resposta in enumerate(respostas_lista)
@@ -626,7 +771,15 @@ def corrigir_manual(
             respostas_detectadas,
         )
         total_questoes = len(gabaritos)
-        nota_dia = _salvar_resultado_aluno(db, aluno_id, modelo, serie, acertos, total_questoes)
+        nota_dia = _salvar_resultado_aluno(
+            db,
+            aluno_id,
+            modelo,
+            serie,
+            codigo_gabarito,
+            acertos,
+            total_questoes,
+        )
         resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
         db.commit()
     except SQLAlchemyError as exc:
@@ -640,6 +793,7 @@ def corrigir_manual(
         "bimestre": bimestre,
         "dia": dia,
         "serie": serie,
+        "codigo_gabarito": codigo_gabarito,
         "acertos": acertos,
         "total_questoes": total_questoes,
         "nota_dia": nota_dia,
@@ -659,8 +813,8 @@ async def corrigir_foto(
     db: Session = Depends(get_db),
 ):
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
-    serie = _buscar_serie_aluno(db, aluno_id)
-    gabaritos = _buscar_gabarito(db, modelo.id, serie)
+    serie, codigo_gabarito = _buscar_contexto_aluno(db, aluno_id, modelo)
+    gabaritos = _buscar_gabarito(db, modelo.id, serie, codigo_gabarito)
     total_questoes = len(gabaritos)
 
     nome_arquivo, caminho_arquivo = _salvar_upload(foto, await foto.read())
@@ -698,7 +852,15 @@ async def corrigir_foto(
             gabaritos,
             respostas_detectadas,
         )
-        nota_dia = _salvar_resultado_aluno(db, aluno_id, modelo, serie, acertos, total_questoes)
+        nota_dia = _salvar_resultado_aluno(
+            db,
+            aluno_id,
+            modelo,
+            serie,
+            codigo_gabarito,
+            acertos,
+            total_questoes,
+        )
         resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
         db.commit()
     except SQLAlchemyError as exc:
@@ -712,6 +874,7 @@ async def corrigir_foto(
         "bimestre": bimestre,
         "dia": dia,
         "serie": serie,
+        "codigo_gabarito": codigo_gabarito,
         "imagem_original": nome_arquivo,
         "imagem_alinhada": f"folha_{nome_arquivo}",
         "imagem_threshold": f"threshold_{nome_arquivo}",
@@ -737,8 +900,8 @@ def corrigir_foto_existente(
     db: Session = Depends(get_db),
 ):
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
-    serie = _buscar_serie_aluno(db, aluno_id)
-    gabaritos = _buscar_gabarito(db, modelo.id, serie)
+    serie, codigo_gabarito = _buscar_contexto_aluno(db, aluno_id, modelo)
+    gabaritos = _buscar_gabarito(db, modelo.id, serie, codigo_gabarito)
     total_questoes = len(gabaritos)
 
     nome_arquivo = os.path.basename(nome_arquivo)
@@ -787,7 +950,15 @@ def corrigir_foto_existente(
             gabaritos,
             respostas_detectadas,
         )
-        nota_dia = _salvar_resultado_aluno(db, aluno_id, modelo, serie, acertos, total_questoes)
+        nota_dia = _salvar_resultado_aluno(
+            db,
+            aluno_id,
+            modelo,
+            serie,
+            codigo_gabarito,
+            acertos,
+            total_questoes,
+        )
         resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
         db.commit()
     except SQLAlchemyError as exc:
@@ -801,6 +972,7 @@ def corrigir_foto_existente(
         "bimestre": bimestre,
         "dia": dia,
         "serie": serie,
+        "codigo_gabarito": codigo_gabarito,
         "imagem_original": nome_arquivo,
         "imagem_alinhada": f"folha_{nome_arquivo}",
         "imagem_threshold": f"threshold_{nome_arquivo}",
@@ -928,22 +1100,31 @@ def listar_resultados_alunos(
             globais_por_aluno[aluno_id] = {
                 "acertos_global": 0,
                 "total_questoes_global": 0,
+                "notas": [],
             }
 
         globais_por_aluno[aluno_id]["acertos_global"] += resultado.acertos
         globais_por_aluno[aluno_id]["total_questoes_global"] += resultado.total_questoes
+        if resultado.nota_global is not None:
+            globais_por_aluno[aluno_id]["notas"].append(resultado.nota_global)
 
         dia_resultado = resultado.dia
         dias_por_aluno.setdefault(aluno_id, {})[dia_resultado] = {
             "acertos": resultado.acertos,
             "total_questoes": resultado.total_questoes,
             "nota": resultado.nota_global,
+            "codigo_gabarito": resultado.codigo_gabarito,
         }
 
     for resumo in globais_por_aluno.values():
-        resumo["nota_global"] = _calcular_nota(
-            resumo["acertos_global"],
-            resumo["total_questoes_global"],
+        notas = resumo.pop("notas", [])
+        resumo["nota_global"] = (
+            round(sum(notas) / len(notas), 1)
+            if notas
+            else _calcular_nota(
+                resumo["acertos_global"],
+                resumo["total_questoes_global"],
+            )
         )
 
     for resultado in resultados:
@@ -965,6 +1146,7 @@ def listar_resultados_alunos(
             "bimestre": resultado.bimestre,
             "dia": resultado.dia,
             "serie": resultado.serie,
+            "codigo_gabarito": resultado.codigo_gabarito,
             "acertos": acertos_linha,
             "total_questoes": total_linha,
             "nota_dia": resultado.nota_global if dia is not None else None,
@@ -1019,11 +1201,11 @@ def baixar_resultado_final_excel(
     if not escola:
         raise HTTPException(status_code=404, detail="Escola nao encontrada")
 
+    return baixar_resultado_final_xlsx(escola_id, bimestre, db)
+
     disciplinas, linhas = _montar_resultado_final_escola(db, escola_id, bimestre)
-    arquivo = StringIO()
-    arquivo.write("\ufeff")
+    arquivo = _montar_excel_resultado_final(escola.nome, bimestre, disciplinas, linhas)
     arquivo.write(";".join(["Turma", "Nº", "Aluno", *disciplinas, "Nota global", "Status"]))
-    arquivo.write("\n")
 
     for linha in linhas:
         valores = [
@@ -1045,6 +1227,65 @@ def baixar_resultado_final_excel(
         media_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'},
     )
+
+
+@app.get("/resultado-final-xlsx")
+def baixar_resultado_final_xlsx(
+    escola_id: str,
+    bimestre: int,
+    db: Session = Depends(get_db),
+):
+    escola = db.query(models.Escola).filter(models.Escola.id == escola_id).first()
+    if not escola:
+        raise HTTPException(status_code=404, detail="Escola nao encontrada")
+
+    disciplinas, linhas = _montar_resultado_final_escola(db, escola_id, bimestre)
+    arquivo = _montar_excel_resultado_final(escola.nome, bimestre, disciplinas, linhas)
+    nome_arquivo = f"resultado_final_{bimestre}_bimestre.xlsx"
+
+    return StreamingResponse(
+        arquivo,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'},
+    )
+
+
+@app.patch("/nota-aluno")
+def editar_nota_aluno(
+    aluno_id: str = Form(...),
+    escola_id: str = Form(...),
+    bimestre: int = Form(...),
+    dia: int = Form(...),
+    nota: float = Form(...),
+    db: Session = Depends(get_db),
+):
+    if nota < 0 or nota > 10:
+        raise HTTPException(status_code=400, detail="A nota deve estar entre 0 e 10")
+
+    modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+    resultado = (
+        db.query(models.ResultadoAluno)
+        .filter(models.ResultadoAluno.aluno_id == aluno_id)
+        .filter(models.ResultadoAluno.modelo_prova_id == modelo.id)
+        .first()
+    )
+
+    if not resultado:
+        raise HTTPException(status_code=404, detail="Resultado do aluno nao encontrado")
+
+    resultado.nota_global = round(nota, 1)
+    db.commit()
+    resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
+
+    return {
+        "mensagem": "Nota atualizada com sucesso",
+        "aluno_id": aluno_id,
+        "escola_id": escola_id,
+        "bimestre": bimestre,
+        "dia": dia,
+        "nota_dia": resultado.nota_global,
+        **resumo_global,
+    }
 
 
 @app.get("/resultados")
