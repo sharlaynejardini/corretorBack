@@ -1062,6 +1062,12 @@ def buscar_respostas_aluno(
     db: Session = Depends(get_db),
 ):
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+    resultado = (
+        db.query(models.ResultadoAluno)
+        .filter(models.ResultadoAluno.aluno_id == aluno_id)
+        .filter(models.ResultadoAluno.modelo_prova_id == modelo.id)
+        .first()
+    )
 
     respostas = (
         db.query(models.RespostaAluno)
@@ -1072,9 +1078,9 @@ def buscar_respostas_aluno(
     )
 
     respostas_salvas = [_resposta_aluno_para_dict(resposta) for resposta in respostas]
-    total_questoes = len(respostas_salvas)
-    acertos = sum(1 for resposta in respostas_salvas if resposta["acertou"])
-    nota_dia = _calcular_nota(acertos, total_questoes)
+    total_questoes = resultado.total_questoes if resultado else len(respostas_salvas)
+    acertos = resultado.acertos if resultado else sum(1 for resposta in respostas_salvas if resposta["acertou"])
+    nota_dia = resultado.nota_global if resultado else _calcular_nota(acertos, total_questoes)
     resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
 
     return {
@@ -1083,11 +1089,53 @@ def buscar_respostas_aluno(
         "bimestre": bimestre,
         "dia": dia,
         "modelo_prova_id": str(modelo.id),
+        "codigo_gabarito": resultado.codigo_gabarito if resultado else None,
         "respostas_salvas": respostas_salvas,
         "gabarito_lido_tabulado": _tabular_respostas(respostas_salvas),
         "acertos": acertos,
         "total_questoes": total_questoes,
         "nota_dia": nota_dia,
+        **resumo_global,
+    }
+
+
+@app.delete("/correcao-aluno")
+def excluir_correcao_aluno(
+    aluno_id: str,
+    escola_id: str,
+    bimestre: int,
+    dia: int,
+    db: Session = Depends(get_db),
+):
+    modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+
+    respostas_removidas = (
+        db.query(models.RespostaAluno)
+        .filter(models.RespostaAluno.aluno_id == aluno_id)
+        .filter(models.RespostaAluno.modelo_prova_id == modelo.id)
+        .delete(synchronize_session=False)
+    )
+    resultados_removidos = (
+        db.query(models.ResultadoAluno)
+        .filter(models.ResultadoAluno.aluno_id == aluno_id)
+        .filter(models.ResultadoAluno.modelo_prova_id == modelo.id)
+        .delete(synchronize_session=False)
+    )
+
+    if not respostas_removidas and not resultados_removidos:
+        raise HTTPException(status_code=404, detail="Correcao do aluno nao encontrada")
+
+    db.commit()
+    resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
+
+    return {
+        "mensagem": "Correcao excluida com sucesso",
+        "aluno_id": aluno_id,
+        "escola_id": escola_id,
+        "bimestre": bimestre,
+        "dia": dia,
+        "respostas_removidas": respostas_removidas,
+        "resultados_removidos": resultados_removidos,
         **resumo_global,
     }
 
@@ -1328,6 +1376,17 @@ def editar_nota_aluno(
         raise HTTPException(status_code=400, detail="A nota deve estar entre 0 e 10")
 
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+    aluno = db.query(models.Aluno).filter(models.Aluno.id == aluno_id).first()
+
+    if not aluno:
+        raise HTTPException(status_code=404, detail="Aluno nao encontrado")
+
+    turma = db.query(models.Turma).filter(models.Turma.id == aluno.turma_id).first()
+    serie = _extrair_serie_turma(turma.nome if turma else "")
+
+    if not serie:
+        raise HTTPException(status_code=400, detail="Nao consegui identificar a serie do aluno")
+
     resultado = (
         db.query(models.ResultadoAluno)
         .filter(models.ResultadoAluno.aluno_id == aluno_id)
@@ -1336,9 +1395,26 @@ def editar_nota_aluno(
     )
 
     if not resultado:
-        raise HTTPException(status_code=404, detail="Resultado do aluno nao encontrado")
+        resultado = models.ResultadoAluno(
+            aluno_id=aluno_id,
+            modelo_prova_id=modelo.id,
+            escola_id=modelo.escola_id,
+            bimestre=modelo.bimestre,
+            dia=modelo.dia,
+            serie=serie,
+            codigo_gabarito=GABARITO_PADRAO,
+            acertos=0,
+            total_questoes=0,
+            nota_global=round(nota, 1),
+        )
+        db.add(resultado)
+    else:
+        resultado.escola_id = modelo.escola_id
+        resultado.bimestre = modelo.bimestre
+        resultado.dia = modelo.dia
+        resultado.serie = serie
+        resultado.nota_global = round(nota, 1)
 
-    resultado.nota_global = round(nota, 1)
     db.commit()
     resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
 
