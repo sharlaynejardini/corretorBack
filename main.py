@@ -1435,6 +1435,61 @@ def editar_nota_aluno(
     }
 
 
+@app.patch("/acertos-aluno")
+def editar_acertos_aluno(
+    aluno_id: str = Form(...),
+    escola_id: str = Form(...),
+    bimestre: int = Form(...),
+    dia: int = Form(...),
+    acertos: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+    resultado = (
+        db.query(models.ResultadoAluno)
+        .filter(models.ResultadoAluno.aluno_id == aluno_id)
+        .filter(models.ResultadoAluno.modelo_prova_id == modelo.id)
+        .first()
+    )
+
+    if not resultado:
+        raise HTTPException(status_code=404, detail="Resultado do aluno nao encontrado")
+
+    if acertos < 0 or acertos > resultado.total_questoes:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Acertos devem ficar entre 0 e {resultado.total_questoes}",
+        )
+
+    respostas = (
+        db.query(models.RespostaAluno)
+        .filter(models.RespostaAluno.aluno_id == aluno_id)
+        .filter(models.RespostaAluno.modelo_prova_id == modelo.id)
+        .order_by(models.RespostaAluno.numero_questao)
+        .all()
+    )
+
+    for indice, resposta in enumerate(respostas):
+        resposta.acertou = indice < acertos
+
+    resultado.acertos = acertos
+    resultado.nota_global = _calcular_nota(acertos, resultado.total_questoes)
+    db.commit()
+    resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
+
+    return {
+        "mensagem": "Acertos atualizados com sucesso",
+        "aluno_id": aluno_id,
+        "escola_id": escola_id,
+        "bimestre": bimestre,
+        "dia": dia,
+        "acertos": resultado.acertos,
+        "total_questoes": resultado.total_questoes,
+        "nota_dia": resultado.nota_global,
+        **resumo_global,
+    }
+
+
 @app.patch("/nota-adaptada")
 def salvar_nota_adaptada(
     aluno_id: str = Form(...),
