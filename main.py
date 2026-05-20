@@ -1,4 +1,5 @@
 import os
+import json
 import unicodedata
 import uuid
 from io import BytesIO
@@ -359,6 +360,21 @@ def _calcular_nota_global_bimestre(db: Session, aluno_id: str, escola_id: str, b
         "total_questoes_global": total_questoes,
         "nota_global": round(sum(notas) / len(notas), 1) if notas else _calcular_nota(acertos, total_questoes),
     }
+
+
+def _buscar_serie_aluno(db: Session, aluno_id: str):
+    aluno = db.query(models.Aluno).filter(models.Aluno.id == aluno_id).first()
+
+    if not aluno:
+        raise HTTPException(status_code=404, detail="Aluno nao encontrado")
+
+    turma = db.query(models.Turma).filter(models.Turma.id == aluno.turma_id).first()
+    serie = _extrair_serie_turma(turma.nome if turma else "")
+
+    if not serie:
+        raise HTTPException(status_code=400, detail="Nao consegui identificar a serie do aluno")
+
+    return serie
 
 
 def _salvar_resultado_aluno(
@@ -1376,17 +1392,7 @@ def editar_nota_aluno(
         raise HTTPException(status_code=400, detail="A nota deve estar entre 0 e 10")
 
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
-    aluno = db.query(models.Aluno).filter(models.Aluno.id == aluno_id).first()
-
-    if not aluno:
-        raise HTTPException(status_code=404, detail="Aluno nao encontrado")
-
-    turma = db.query(models.Turma).filter(models.Turma.id == aluno.turma_id).first()
-    serie = _extrair_serie_turma(turma.nome if turma else "")
-
-    if not serie:
-        raise HTTPException(status_code=400, detail="Nao consegui identificar a serie do aluno")
-
+    serie = _buscar_serie_aluno(db, aluno_id)
     resultado = (
         db.query(models.ResultadoAluno)
         .filter(models.ResultadoAluno.aluno_id == aluno_id)
@@ -1425,6 +1431,132 @@ def editar_nota_aluno(
         "bimestre": bimestre,
         "dia": dia,
         "nota_dia": resultado.nota_global,
+        **resumo_global,
+    }
+
+
+@app.patch("/nota-adaptada")
+def salvar_nota_adaptada(
+    aluno_id: str = Form(...),
+    escola_id: str = Form(...),
+    bimestre: int = Form(...),
+    dia: int = Form(...),
+    acertos_disciplinas: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+    serie = _buscar_serie_aluno(db, aluno_id)
+
+    disciplinas = (
+        db.query(models.DisciplinaProva)
+        .filter(models.DisciplinaProva.modelo_prova_id == modelo.id)
+        .order_by(models.DisciplinaProva.ordem)
+        .all()
+    )
+
+    if not disciplinas:
+        raise HTTPException(status_code=404, detail="Disciplinas da prova nao encontradas")
+
+    try:
+        acertos_por_disciplina = json.loads(acertos_disciplinas)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Acertos por disciplina invalidos") from exc
+
+    total_acertos = 0
+    total_questoes = 0
+
+    try:
+        (
+            db.query(models.RespostaAluno)
+            .filter(models.RespostaAluno.aluno_id == aluno_id)
+            .filter(models.RespostaAluno.modelo_prova_id == modelo.id)
+            .delete(synchronize_session=False)
+        )
+
+        numero_questao = 1
+        for disciplina in disciplinas:
+            acertos = acertos_por_disciplina.get(disciplina.disciplina)
+            if acertos is None:
+                acertos = acertos_por_disciplina.get(disciplina.sigla)
+
+            if acertos is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Informe os acertos de {disciplina.disciplina}",
+                )
+
+            try:
+                acertos = int(acertos)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Acertos de {disciplina.disciplina} devem ser um numero inteiro",
+                ) from exc
+
+            if acertos < 0 or acertos > disciplina.quantidade_questoes:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Acertos de {disciplina.disciplina} devem ficar entre 0 "
+                        f"e {disciplina.quantidade_questoes}"
+                    ),
+                )
+
+            total_acertos += acertos
+            total_questoes += disciplina.quantidade_questoes
+
+            for indice in range(disciplina.quantidade_questoes):
+                db.add(
+                    models.RespostaAluno(
+                        aluno_id=aluno_id,
+                        modelo_prova_id=modelo.id,
+                        numero_questao=numero_questao,
+                        disciplina=disciplina.disciplina,
+                        resposta_aluno=None,
+                        resposta_correta=None,
+                        acertou=indice < acertos,
+                    )
+                )
+                numero_questao += 1
+
+        nota_dia = _salvar_resultado_aluno(
+            db,
+            aluno_id,
+            modelo,
+            serie,
+            GABARITO_PADRAO,
+            total_acertos,
+            total_questoes,
+        )
+        resumo_global = _calcular_nota_global_bimestre(db, aluno_id, escola_id, bimestre)
+        db.commit()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Erro ao salvar prova adaptada: {exc}") from exc
+
+    respostas = (
+        db.query(models.RespostaAluno)
+        .filter(models.RespostaAluno.aluno_id == aluno_id)
+        .filter(models.RespostaAluno.modelo_prova_id == modelo.id)
+        .order_by(models.RespostaAluno.numero_questao)
+        .all()
+    )
+    respostas_salvas = [_resposta_aluno_para_dict(resposta) for resposta in respostas]
+
+    return {
+        "mensagem": "Prova adaptada salva com sucesso",
+        "aluno_id": aluno_id,
+        "escola_id": escola_id,
+        "bimestre": bimestre,
+        "dia": dia,
+        "serie": serie,
+        "codigo_gabarito": GABARITO_PADRAO,
+        "modelo_prova_id": str(modelo.id),
+        "respostas_salvas": respostas_salvas,
+        "gabarito_lido_tabulado": _tabular_respostas(respostas_salvas),
+        "acertos": total_acertos,
+        "total_questoes": total_questoes,
+        "nota_dia": nota_dia,
         **resumo_global,
     }
 
