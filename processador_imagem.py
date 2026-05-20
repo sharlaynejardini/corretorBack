@@ -376,6 +376,188 @@ def _ler_grade(folha_threshold, total_questoes, grade):
     return respostas, debug
 
 
+def _clusters_linhas(projecao, minimo):
+    indices = np.where(projecao >= minimo)[0]
+    if len(indices) == 0:
+        return []
+
+    clusters = []
+    inicio = indices[0]
+    anterior = indices[0]
+
+    for indice in indices[1:]:
+        if indice > anterior + 1:
+            clusters.append((inicio, anterior))
+            inicio = indice
+        anterior = indice
+
+    clusters.append((inicio, anterior))
+    return [int((inicio + fim) / 2) for inicio, fim in clusters]
+
+
+def _intervalos_linhas(posicoes, minimo_intervalo=4):
+    posicoes = sorted(set(posicoes))
+    return [
+        (inicio, fim)
+        for inicio, fim in zip(posicoes, posicoes[1:])
+        if fim - inicio >= minimo_intervalo
+    ]
+
+
+def _detectar_blocos_grade(folha_threshold):
+    altura, largura = folha_threshold.shape
+    kernel_vertical = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (1, max(int(altura * 0.08), 15)),
+    )
+    kernel_horizontal = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (max(int(largura * 0.04), 20), 1),
+    )
+    linhas_verticais = cv2.morphologyEx(folha_threshold, cv2.MORPH_OPEN, kernel_vertical)
+    linhas_horizontais = cv2.morphologyEx(folha_threshold, cv2.MORPH_OPEN, kernel_horizontal)
+    grade = cv2.add(linhas_verticais, linhas_horizontais)
+
+    contornos = cv2.findContours(
+        grade.copy(),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    contornos = imutils.grab_contours(contornos)
+    blocos = []
+
+    for contorno in contornos:
+        x, y, w, h = cv2.boundingRect(contorno)
+        area = w * h
+
+        if area < largura * altura * 0.025:
+            continue
+
+        if w > largura * 0.92 and h > altura * 0.88:
+            continue
+
+        if w < largura * 0.12 or h < altura * 0.18:
+            continue
+
+        blocos.append((x, y, w, h))
+
+    if len(blocos) < 4:
+        return None
+
+    blocos = sorted(blocos, key=lambda bloco: bloco[2] * bloco[3], reverse=True)[:4]
+    blocos_ordenados = []
+    blocos_por_altura = sorted(blocos, key=lambda bloco: bloco[1])
+    topo = blocos_por_altura[:2]
+    baixo = blocos_por_altura[2:4]
+    blocos_ordenados.extend(sorted(topo, key=lambda bloco: bloco[0]))
+    blocos_ordenados.extend(sorted(baixo, key=lambda bloco: bloco[0]))
+
+    quantidades = [12, 6, 6, 6]
+    questao_inicial = 1
+    resultado = []
+
+    for bloco, quantidade in zip(blocos_ordenados, quantidades):
+        resultado.append(
+            {
+                "rect": bloco,
+                "questao_inicial": questao_inicial,
+                "quantidade": quantidade,
+            }
+        )
+        questao_inicial += quantidade
+
+    return resultado, linhas_verticais, linhas_horizontais
+
+
+def _ler_grade_por_blocos(folha_threshold, blocos_info):
+    blocos, linhas_verticais, linhas_horizontais = blocos_info
+    respostas = {}
+    debug = []
+
+    for bloco in blocos:
+        x, y, w, h = bloco["rect"]
+        quantidade = bloco["quantidade"]
+        questao_inicial = bloco["questao_inicial"]
+
+        recorte_vertical = linhas_verticais[y : y + h, x : x + w]
+        recorte_horizontal = linhas_horizontais[y : y + h, x : x + w]
+        xs = _clusters_linhas(
+            np.sum(recorte_vertical > 0, axis=0),
+            max(int(h * 0.30), 8),
+        )
+        ys = _clusters_linhas(
+            np.sum(recorte_horizontal > 0, axis=1),
+            max(int(w * 0.25), 12),
+        )
+
+        intervalos_x = _intervalos_linhas(xs)
+        intervalos_y = _intervalos_linhas(ys)
+
+        if len(intervalos_x) < quantidade or len(intervalos_y) < 4:
+            return None
+
+        intervalos_x = sorted(intervalos_x, key=lambda intervalo: intervalo[0])[-quantidade:]
+        intervalos_y = sorted(intervalos_y, key=lambda intervalo: intervalo[0])[-4:]
+
+        for deslocamento, intervalo_x in enumerate(intervalos_x):
+            questao = questao_inicial + deslocamento
+            melhor_alternativa = None
+            maior_pixels = -1
+            contagens = {}
+            regioes = {}
+
+            for alternativa, intervalo_y in zip(("A", "B", "C", "D"), intervalos_y):
+                x1 = x + intervalo_x[0] + 3
+                x2 = x + intervalo_x[1] - 3
+                y1 = y + intervalo_y[0] + 3
+                y2 = y + intervalo_y[1] - 3
+
+                if x2 <= x1 or y2 <= y1:
+                    pixels = 0
+                else:
+                    recorte = folha_threshold[y1:y2, x1:x2]
+                    pixels = int(cv2.countNonZero(recorte))
+
+                contagens[alternativa] = pixels
+                regioes[alternativa] = {
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                }
+
+                if pixels > maior_pixels:
+                    maior_pixels = pixels
+                    melhor_alternativa = alternativa
+
+            ordenadas = sorted(contagens.values(), reverse=True)
+            segundo_maior = ordenadas[1] if len(ordenadas) > 1 else 0
+            diferenca = maior_pixels - segundo_maior
+            confianca = round(maior_pixels / max(segundo_maior, 1), 2)
+            respostas[questao] = melhor_alternativa
+            debug.append(
+                {
+                    "questao": questao,
+                    "resposta": melhor_alternativa,
+                    "bloco": "detectado",
+                    "contagens": contagens,
+                    "maior_pixels": maior_pixels,
+                    "segundo_maior_pixels": segundo_maior,
+                    "diferenca_pixels": diferenca,
+                    "confianca": confianca,
+                    "centro_x": int((regioes[melhor_alternativa]["x1"] + regioes[melhor_alternativa]["x2"]) / 2),
+                    "centros_y": {
+                        alternativa: int((regiao["y1"] + regiao["y2"]) / 2)
+                        for alternativa, regiao in regioes.items()
+                    },
+                    "regioes": regioes,
+                    "tentativa_grade": {"metodo": "linhas_detectadas"},
+                }
+            )
+
+    return respostas, debug
+
+
 def _pontuar_debug(debug):
     confiancas = [item["confianca"] for item in debug]
     diferencas = [item["diferenca_pixels"] for item in debug]
@@ -394,6 +576,12 @@ def _ler_grade_com_tentativas(folha_threshold, total_questoes):
     if total_questoes != 30:
         grade = _grade_questoes(largura, altura, total_questoes)
         return _ler_grade(folha_threshold, total_questoes, grade)
+
+    blocos_info = _detectar_blocos_grade(folha_threshold)
+    if blocos_info is not None:
+        leitura_blocos = _ler_grade_por_blocos(folha_threshold, blocos_info)
+        if leitura_blocos is not None:
+            return leitura_blocos
 
     melhor = None
     deslocamentos_x = [0, -8, 8, -14, 14]
