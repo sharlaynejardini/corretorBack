@@ -18,7 +18,7 @@ from processador_imagem import ler_respostas_grade_fixa, processar_folha
 
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads" if os.getenv("VERCEL") else "uploads")
-ALTERNATIVAS_VALIDAS = {"A", "B", "C", "D"}
+ALTERNATIVAS_VALIDAS = {"A", "B", "C", "D", "X"}
 GABARITO_PADRAO = "PADRAO"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -89,6 +89,57 @@ def _preparar_banco():
                 """
                 alter table if exists resultados_alunos
                 add column if not exists codigo_gabarito varchar not null default 'PADRAO'
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                alter table if exists gabaritos
+                drop constraint if exists gabaritos_resposta_correta_check
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                alter table if exists gabaritos
+                add constraint gabaritos_resposta_correta_check
+                check (resposta_correta in ('A', 'B', 'C', 'D', 'X'))
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                alter table if exists respostas_alunos
+                drop constraint if exists respostas_alunos_resposta_aluno_check
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                alter table if exists respostas_alunos
+                add constraint respostas_alunos_resposta_aluno_check
+                check (resposta_aluno in ('A', 'B', 'C', 'D', 'X'))
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                alter table if exists respostas_alunos
+                drop constraint if exists respostas_alunos_resposta_correta_check
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                alter table if exists respostas_alunos
+                add constraint respostas_alunos_resposta_correta_check
+                check (resposta_correta in ('A', 'B', 'C', 'D', 'X'))
                 """
             )
         )
@@ -214,6 +265,10 @@ def _normalizar_resposta(resposta):
     return resposta if resposta in ALTERNATIVAS_VALIDAS else None
 
 
+def _questao_anulada(resposta_correta):
+    return _normalizar_resposta(resposta_correta) == "X"
+
+
 def _salvar_upload(foto: UploadFile, conteudo: bytes):
     if not foto.filename:
         raise HTTPException(status_code=400, detail="Arquivo sem nome")
@@ -254,7 +309,7 @@ def _comparar_e_salvar_respostas(db: Session, aluno_id: str, modelo_id, gabarito
             or respostas_detectadas.get(str(gab.numero_questao))
         )
         resposta_correta = _normalizar_resposta(gab.resposta_correta)
-        acertou = resposta_aluno == resposta_correta
+        acertou = True if _questao_anulada(resposta_correta) else resposta_aluno == resposta_correta
 
         if acertou:
             acertos += 1
@@ -682,7 +737,7 @@ def salvar_gabarito(
     respostas_lista = [_normalizar_resposta(resposta) for resposta in respostas.split(",") if resposta.strip()]
 
     if any(resposta is None for resposta in respostas_lista):
-        raise HTTPException(status_code=400, detail="Use somente alternativas A, B, C ou D")
+        raise HTTPException(status_code=400, detail="Use somente alternativas A, B, C, D ou X")
 
     total_esperado = sum(disciplina.quantidade_questoes for disciplina in disciplinas)
     if len(respostas_lista) != total_esperado:
