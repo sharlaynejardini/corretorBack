@@ -99,6 +99,108 @@ def _corrigir_perspectiva_folha(imagem, bordas):
     return folha
 
 
+def _rotacoes_imagem(imagem):
+    return [
+        ("0", imagem),
+        ("90", cv2.rotate(imagem, cv2.ROTATE_90_CLOCKWISE)),
+        ("180", cv2.rotate(imagem, cv2.ROTATE_180)),
+        ("270", cv2.rotate(imagem, cv2.ROTATE_90_COUNTERCLOCKWISE)),
+    ]
+
+
+def _bordas_imagem(imagem):
+    cinza = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(cinza, (5, 5), 0)
+    return cv2.Canny(blur, 50, 180)
+
+
+def _candidatos_folha_por_contorno(imagem, bordas):
+    altura, largura = imagem.shape[:2]
+    area_img = altura * largura
+    candidatos = []
+
+    contornos = cv2.findContours(
+        bordas.copy(),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    contornos = imutils.grab_contours(contornos)
+    contornos = sorted(contornos, key=cv2.contourArea, reverse=True)[:12]
+
+    for contorno in contornos:
+        area = cv2.contourArea(contorno)
+        if area < area_img * 0.12:
+            continue
+
+        perimetro = cv2.arcLength(contorno, True)
+
+        for fator in (0.02, 0.03, 0.04, 0.06, 0.08):
+            aproximado = cv2.approxPolyDP(contorno, fator * perimetro, True)
+            if len(aproximado) == 4:
+                try:
+                    candidatos.append(transformar_perspectiva(imagem, aproximado.reshape(4, 2)))
+                except Exception:
+                    pass
+                break
+
+        retangulo = cv2.minAreaRect(contorno)
+        pontos = cv2.boxPoints(retangulo)
+        try:
+            candidatos.append(transformar_perspectiva(imagem, pontos))
+        except Exception:
+            pass
+
+    return [
+        candidato
+        for candidato in candidatos
+        if candidato is not None
+        and candidato.shape[0] >= 300
+        and candidato.shape[1] >= 300
+    ]
+
+
+def _normalizar_orientacao_retrato(folha):
+    if folha is None:
+        return None
+
+    altura, largura = folha.shape[:2]
+    if largura > altura:
+        return cv2.rotate(folha, cv2.ROTATE_90_CLOCKWISE)
+
+    return folha
+
+
+def _normalizar_orientacao_paisagem(folha):
+    if folha is None:
+        return None
+
+    altura, largura = folha.shape[:2]
+    if altura > largura:
+        return cv2.rotate(folha, cv2.ROTATE_90_CLOCKWISE)
+
+    return folha
+
+
+def _preparar_candidatos_imagem(imagem):
+    candidatos = []
+
+    for rotacao, imagem_rotacionada in _rotacoes_imagem(imagem):
+        bordas = _bordas_imagem(imagem_rotacionada)
+        candidatos.append((f"original_{rotacao}", imagem_rotacionada, bordas))
+
+        folha = _corrigir_perspectiva_folha(imagem_rotacionada, bordas)
+        if folha is not None:
+            bordas_folha = _bordas_imagem(folha)
+            candidatos.append((f"folha_{rotacao}", folha, bordas_folha))
+
+        for indice, folha_contorno in enumerate(_candidatos_folha_por_contorno(imagem_rotacionada, bordas)):
+            folha_contorno = _normalizar_orientacao_retrato(folha_contorno)
+            bordas_contorno = _bordas_imagem(folha_contorno)
+            candidatos.append((f"contorno_{rotacao}_{indice}", folha_contorno, bordas_contorno))
+
+    return candidatos
+
+
 def _limiarizar_folha(folha):
     folha_cinza = cv2.cvtColor(folha, cv2.COLOR_BGR2GRAY)
     folha_cinza = cv2.GaussianBlur(folha_cinza, (3, 3), 0)
@@ -146,12 +248,20 @@ def _recortar_gabarito_takaoka(imagem, bordas):
         proporcao = w / float(h)
         perimetro = cv2.arcLength(contorno, True)
         aproximado = cv2.approxPolyDP(contorno, 0.02 * perimetro, True)
+        retangulo = cv2.minAreaRect(contorno)
+        largura_ret, altura_ret = retangulo[1]
+        proporcao_retangulo = (
+            max(largura_ret, altura_ret) / float(max(min(largura_ret, altura_ret), 1))
+        )
 
         if (
-            area > max(10000, area_img * 0.04)
-            and h > altura_img * 0.18
-            and w > largura_img * 0.35
-            and 1.35 <= proporcao <= 2.85
+            area > max(6000, area_img * 0.018)
+            and h > altura_img * 0.10
+            and w > largura_img * 0.10
+            and (
+                0.35 <= proporcao <= 3.10
+                or 1.25 <= proporcao_retangulo <= 3.25
+            )
         ):
             candidatos.append((area, x, y, w, h, aproximado, contorno))
 
@@ -161,7 +271,9 @@ def _recortar_gabarito_takaoka(imagem, bordas):
     _, x, y, w, h, aproximado, contorno = max(candidatos, key=lambda item: item[0])
 
     if len(aproximado) == 4:
-        return transformar_perspectiva(imagem, aproximado.reshape(4, 2))
+        return _normalizar_orientacao_paisagem(
+            transformar_perspectiva(imagem, aproximado.reshape(4, 2))
+        )
 
     retangulo = cv2.minAreaRect(contorno)
     pontos = cv2.boxPoints(retangulo)
@@ -173,7 +285,7 @@ def _recortar_gabarito_takaoka(imagem, bordas):
         if largura_folha / float(max(altura_folha, 1)) < 1:
             folha = cv2.rotate(folha, cv2.ROTATE_90_CLOCKWISE)
 
-        return folha
+        return _normalizar_orientacao_paisagem(folha)
     except Exception:
         pass
 
@@ -183,7 +295,7 @@ def _recortar_gabarito_takaoka(imagem, bordas):
     y2 = min(y + h + margem, imagem.shape[0])
     x2 = min(x + w + margem, imagem.shape[1])
 
-    return imagem[y1:y2, x1:x2]
+    return _normalizar_orientacao_paisagem(imagem[y1:y2, x1:x2])
 
 
 def _pontuar_gabarito_takaoka(folha):
@@ -214,6 +326,41 @@ def _pontuar_gabarito_takaoka(folha):
     return cv2.countNonZero(linhas) - penalidade_proporcao
 
 
+def _pontuar_folha_generica(folha):
+    if folha is None:
+        return -1
+
+    altura, largura = folha.shape[:2]
+    if altura <= 0 or largura <= 0:
+        return -1
+
+    _, folha_threshold = _limiarizar_folha(folha)
+    contornos = cv2.findContours(
+        folha_threshold.copy(),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    contornos = imutils.grab_contours(contornos)
+    bolhas = 0
+    linhas = 0
+
+    for contorno in contornos:
+        x, y, w, h = cv2.boundingRect(contorno)
+        area = cv2.contourArea(contorno)
+        proporcao = w / float(max(h, 1))
+
+        if w >= 10 and h >= 10 and area >= 80 and 0.55 <= proporcao <= 1.55:
+            bolhas += 1
+
+        if (w > largura * 0.30 and h < altura * 0.04) or (h > altura * 0.30 and w < largura * 0.04):
+            linhas += 1
+
+    proporcao_folha = altura / float(max(largura, 1))
+    penalidade_proporcao = abs(proporcao_folha - 1.42) * 80
+
+    return (bolhas * 20) + (linhas * 5) - penalidade_proporcao
+
+
 def _preparar_leitura_takaoka(folha):
     folha_cinza, folha_threshold = _limiarizar_folha(folha)
     mascara_azul = _mascara_marcacoes_azuis(folha)
@@ -236,26 +383,22 @@ def processar_folha(caminho_arquivo, total_questoes=None):
     try:
         imagem = imutils.resize(imagem, height=1200)
         original = imagem.copy()
-
-        cinza = cv2.cvtColor(imagem, cv2.COLOR_BGR2GRAY)
-        blur = cv2.GaussianBlur(cinza, (5, 5), 0)
-        bordas = cv2.Canny(blur, 75, 200)
+        bordas = _bordas_imagem(imagem)
 
         if total_questoes == 30:
-            imagens_candidatas = [(original, bordas)]
-            folha_inteira = _corrigir_perspectiva_folha(original, bordas)
-
-            if folha_inteira is not None:
-                cinza_folha = cv2.cvtColor(folha_inteira, cv2.COLOR_BGR2GRAY)
-                blur_folha = cv2.GaussianBlur(cinza_folha, (5, 5), 0)
-                bordas_folha = cv2.Canny(blur_folha, 75, 200)
-                imagens_candidatas.append((folha_inteira, bordas_folha))
+            imagens_candidatas = _preparar_candidatos_imagem(original)
 
             recortes = [
                 _recortar_gabarito_takaoka(imagem_candidata, bordas_candidatas)
-                for imagem_candidata, bordas_candidatas in imagens_candidatas
+                for _, imagem_candidata, bordas_candidatas in imagens_candidatas
             ]
-            recortes = [recorte for recorte in recortes if recorte is not None]
+            recortes = [
+                recorte
+                for recorte in recortes
+                if recorte is not None
+                and recorte.shape[0] >= 240
+                and recorte.shape[1] >= 500
+            ]
             folha = (
                 max(recortes, key=_pontuar_gabarito_takaoka)
                 if recortes
@@ -271,30 +414,21 @@ def processar_folha(caminho_arquivo, total_questoes=None):
                     "folha_threshold": folha_threshold,
                 }, None
 
-        contornos = cv2.findContours(
-            bordas.copy(),
-            cv2.RETR_EXTERNAL,
-            cv2.CHAIN_APPROX_SIMPLE,
-        )
+        candidatos = []
+        for _, imagem_candidata, bordas_candidatas in _preparar_candidatos_imagem(original):
+            folha = _corrigir_perspectiva_folha(imagem_candidata, bordas_candidatas)
+            if folha is not None:
+                candidatos.append(folha)
 
-        contornos = imutils.grab_contours(contornos)
-        contornos = sorted(contornos, key=cv2.contourArea, reverse=True)[:10]
+            candidatos.extend(_candidatos_folha_por_contorno(imagem_candidata, bordas_candidatas))
 
-        folha_contorno = None
+        candidatos = [_normalizar_orientacao_retrato(candidato) for candidato in candidatos]
+        candidatos = [candidato for candidato in candidatos if candidato is not None]
 
-        for contorno in contornos:
-            perimetro = cv2.arcLength(contorno, True)
-            aproximado = cv2.approxPolyDP(contorno, 0.02 * perimetro, True)
-
-            if len(aproximado) == 4:
-                folha_contorno = aproximado
-                break
-
-        if folha_contorno is None:
+        if not candidatos:
             return None, "Nao consegui encontrar o contorno da folha"
 
-        pontos = folha_contorno.reshape(4, 2)
-        folha = transformar_perspectiva(original, pontos)
+        folha = max(candidatos, key=_pontuar_folha_generica)
         folha_cinza, folha_threshold = _limiarizar_folha(folha)
 
         return {
