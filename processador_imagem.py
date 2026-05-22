@@ -99,13 +99,23 @@ def _corrigir_perspectiva_folha(imagem, bordas):
     return folha
 
 
-def _rotacoes_imagem(imagem):
-    return [
+def _rotacoes_imagem(imagem, incluir_inclinacoes=False):
+    bases = [
         ("0", imagem),
         ("90", cv2.rotate(imagem, cv2.ROTATE_90_CLOCKWISE)),
         ("180", cv2.rotate(imagem, cv2.ROTATE_180)),
         ("270", cv2.rotate(imagem, cv2.ROTATE_90_COUNTERCLOCKWISE)),
     ]
+    rotacoes = []
+
+    for nome, base in bases:
+        rotacoes.append((nome, base))
+
+        if incluir_inclinacoes:
+            for angulo in (-25, 25):
+                rotacoes.append((f"{nome}_{angulo}", imutils.rotate_bound(base, angulo)))
+
+    return rotacoes
 
 
 def _bordas_imagem(imagem):
@@ -181,10 +191,10 @@ def _normalizar_orientacao_paisagem(folha):
     return folha
 
 
-def _preparar_candidatos_imagem(imagem):
+def _preparar_candidatos_imagem(imagem, incluir_inclinacoes=False):
     candidatos = []
 
-    for rotacao, imagem_rotacionada in _rotacoes_imagem(imagem):
+    for rotacao, imagem_rotacionada in _rotacoes_imagem(imagem, incluir_inclinacoes):
         bordas = _bordas_imagem(imagem_rotacionada)
         candidatos.append((f"original_{rotacao}", imagem_rotacionada, bordas))
 
@@ -219,10 +229,15 @@ def _mascara_marcacoes_azuis(folha):
     hsv = cv2.cvtColor(folha, cv2.COLOR_BGR2HSV)
     mascara = cv2.inRange(
         hsv,
-        np.array([80, 25, 20]),
+        np.array([75, 20, 20]),
         np.array([140, 255, 255]),
     )
-    return cv2.morphologyEx(mascara, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    mascara = cv2.morphologyEx(mascara, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
+    return cv2.dilate(
+        mascara,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)),
+        iterations=1,
+    )
 
 
 def _mascara_marcacoes_escuras(folha_cinza):
@@ -431,10 +446,13 @@ def _preparar_leitura_takaoka(folha):
     mascara_azul = _mascara_marcacoes_azuis(folha)
     mascara_escura = _mascara_marcacoes_escuras(folha_cinza)
 
-    if cv2.countNonZero(mascara_escura) > 200:
-        folha_threshold = mascara_escura
-    elif cv2.countNonZero(mascara_azul) > 200:
+    pixels_azuis = cv2.countNonZero(mascara_azul)
+    pixels_escuros = cv2.countNonZero(mascara_escura)
+
+    if pixels_azuis > 500 and pixels_azuis > pixels_escuros * 1.5:
         folha_threshold = mascara_azul
+    elif pixels_escuros > 200:
+        folha_threshold = mascara_escura
 
     return folha_cinza, folha_threshold
 
@@ -451,29 +469,50 @@ def processar_folha(caminho_arquivo, total_questoes=None):
         bordas = _bordas_imagem(imagem)
 
         if total_questoes == 30:
-            imagens_candidatas = _preparar_candidatos_imagem(original)
+            def preparar_recortes_takaoka(incluir_inclinacoes=False):
+                imagens_candidatas = _preparar_candidatos_imagem(
+                    original,
+                    incluir_inclinacoes=incluir_inclinacoes,
+                )
+                recortes_candidatos = []
 
-            recortes = []
-            for _, imagem_candidata, bordas_candidatas in imagens_candidatas:
-                recorte_contorno = _recortar_gabarito_takaoka(
-                    imagem_candidata,
-                    bordas_candidatas,
+                for _, imagem_candidata, bordas_candidatas in imagens_candidatas:
+                    recorte_contorno = _recortar_gabarito_takaoka(
+                        imagem_candidata,
+                        bordas_candidatas,
+                    )
+
+                    if recorte_contorno is not None:
+                        recortes_candidatos.append(recorte_contorno)
+
+                    recortes_candidatos.extend(_recortes_gabarito_por_faixa_colorida(imagem_candidata))
+
+                return [
+                    recorte
+                    for recorte in recortes_candidatos
+                    if recorte is not None
+                    and recorte.shape[0] >= 240
+                    and recorte.shape[1] >= 500
+                    and 1.65 <= recorte.shape[1] / float(max(recorte.shape[0], 1)) <= 2.40
+                ]
+
+            melhor = _melhor_recorte_takaoka(
+                preparar_recortes_takaoka(incluir_inclinacoes=False),
+                total_questoes,
+            )
+
+            if melhor is None or melhor[2] < max(total_questoes - 2, 1):
+                melhor_inclinado = _melhor_recorte_takaoka(
+                    preparar_recortes_takaoka(incluir_inclinacoes=True),
+                    total_questoes,
                 )
 
-                if recorte_contorno is not None:
-                    recortes.append(recorte_contorno)
+                if melhor_inclinado is not None and (
+                    melhor is None or melhor_inclinado[0] > melhor[0]
+                ):
+                    melhor = melhor_inclinado
 
-                recortes.extend(_recortes_gabarito_por_faixa_colorida(imagem_candidata))
-
-            recortes = [
-                recorte
-                for recorte in recortes
-                if recorte is not None
-                and recorte.shape[0] >= 240
-                and recorte.shape[1] >= 500
-                and 1.45 <= recorte.shape[1] / float(max(recorte.shape[0], 1)) <= 2.60
-            ]
-            folha = _melhor_recorte_takaoka(recortes, total_questoes)
+            folha = melhor[1] if melhor is not None else None
 
             if folha is not None:
                 folha_cinza, folha_threshold = _preparar_leitura_takaoka(folha)
@@ -941,48 +980,58 @@ def _pontuar_debug(debug):
     )
 
 
+def _avaliar_recorte_takaoka(recorte, total_questoes):
+    _, threshold = _preparar_leitura_takaoka(recorte)
+    respostas, debug = _ler_grade_com_tentativas(threshold, total_questoes)
+    respostas_validas = [
+        resposta
+        for resposta in respostas.values()
+        if resposta in {"A", "B", "C", "D"}
+    ]
+    respondidas = len(respostas_validas)
+    vazias = max(total_questoes - respondidas, 0)
+    alternativas_usadas = len(set(respostas_validas))
+    dominante = (
+        max(respostas_validas.count(alternativa) for alternativa in {"A", "B", "C", "D"})
+        if respostas_validas
+        else 0
+    )
+    proporcao = recorte.shape[1] / float(max(recorte.shape[0], 1))
+    penalidade_proporcao = abs(proporcao - 1.9) * 2000
+    pontuacao = (
+        _pontuar_gabarito_takaoka(recorte)
+        + _pontuar_debug(debug)
+        + respondidas * 5000
+        + alternativas_usadas * 1000
+        - vazias * 5000
+        - dominante * 900
+        - penalidade_proporcao
+    )
+
+    return pontuacao, respondidas
+
+
 def _melhor_recorte_takaoka(recortes, total_questoes):
     melhor = None
+    recortes = sorted(recortes, key=_pontuar_gabarito_takaoka, reverse=True)[:10]
 
     for recorte in recortes:
         try:
-            _, threshold = _preparar_leitura_takaoka(recorte)
-            respostas, debug = _ler_grade_com_tentativas(threshold, total_questoes)
+            pontuacao, respondidas = _avaliar_recorte_takaoka(recorte, total_questoes)
         except Exception:
             continue
 
-        respostas_validas = [
-            resposta
-            for resposta in respostas.values()
-            if resposta in {"A", "B", "C", "D"}
-        ]
-        respondidas = len(respostas_validas)
-        vazias = max(total_questoes - respondidas, 0)
-        alternativas_usadas = len(set(respostas_validas))
-        dominante = (
-            max(respostas_validas.count(alternativa) for alternativa in {"A", "B", "C", "D"})
-            if respostas_validas
-            else 0
-        )
-        proporcao = recorte.shape[1] / float(max(recorte.shape[0], 1))
-        penalidade_proporcao = abs(proporcao - 1.9) * 2000
-        pontuacao = (
-            _pontuar_gabarito_takaoka(recorte)
-            + _pontuar_debug(debug)
-            + respondidas * 5000
-            + alternativas_usadas * 1000
-            - vazias * 5000
-            - dominante * 900
-            - penalidade_proporcao
-        )
-
         if melhor is None or pontuacao > melhor[0]:
-            melhor = (pontuacao, recorte)
+            melhor = (pontuacao, recorte, respondidas)
 
     if melhor is not None:
-        return melhor[1]
+        return melhor
 
-    return max(recortes, key=_pontuar_gabarito_takaoka) if recortes else None
+    if recortes:
+        recorte = max(recortes, key=_pontuar_gabarito_takaoka)
+        return _pontuar_gabarito_takaoka(recorte), recorte, 0
+
+    return None
 
 
 def _ler_grade_com_tentativas(folha_threshold, total_questoes):
