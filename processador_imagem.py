@@ -230,6 +230,71 @@ def _mascara_marcacoes_escuras(folha_cinza):
     return cv2.morphologyEx(mascara, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8))
 
 
+def _mascara_cor_hsv(imagem, minimo, maximo):
+    hsv = cv2.cvtColor(imagem, cv2.COLOR_BGR2HSV)
+    mascara = cv2.inRange(hsv, np.array(minimo), np.array(maximo))
+    kernel = np.ones((5, 5), np.uint8)
+    mascara = cv2.morphologyEx(mascara, cv2.MORPH_OPEN, kernel)
+    return cv2.morphologyEx(mascara, cv2.MORPH_CLOSE, kernel)
+
+
+def _faixas_coloridas(imagem, minimo, maximo):
+    mascara = _mascara_cor_hsv(imagem, minimo, maximo)
+    altura, largura = mascara.shape
+    contornos = cv2.findContours(
+        mascara.copy(),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    contornos = imutils.grab_contours(contornos)
+    faixas = []
+
+    for contorno in contornos:
+        x, y, w, h = cv2.boundingRect(contorno)
+
+        if w < largura * 0.25 or h < altura * 0.008:
+            continue
+
+        faixas.append((x, y, w, h))
+
+    return sorted(faixas, key=lambda faixa: (faixa[1], -faixa[2]))
+
+
+def _recortes_gabarito_por_faixa_colorida(imagem):
+    altura, largura = imagem.shape[:2]
+    amarelas = _faixas_coloridas(imagem, (15, 40, 70), (45, 255, 255))
+    verdes = _faixas_coloridas(imagem, (35, 25, 70), (95, 255, 255))
+    recortes = []
+
+    for x, y, w, h in amarelas:
+        if y > altura * 0.75:
+            continue
+
+        proximas_verdes = [
+            faixa
+            for faixa in verdes
+            if faixa[1] > y + h and faixa[1] - y < altura * 0.55
+        ]
+        y2 = (
+            min(proximas_verdes, key=lambda faixa: faixa[1])[1]
+            if proximas_verdes
+            else min(int(y + altura * 0.36), altura)
+        )
+
+        y1 = max(y - int(altura * 0.01), 0)
+        x1 = max(x - int(largura * 0.02), 0)
+        x2 = min(x + w + int(largura * 0.02), largura)
+
+        if y2 - y1 < altura * 0.12 or x2 - x1 < largura * 0.35:
+            continue
+
+        recorte = imagem[y1:y2, x1:x2]
+        recorte = _normalizar_orientacao_paisagem(recorte)
+        recortes.append(recorte)
+
+    return recortes
+
+
 def _recortar_gabarito_takaoka(imagem, bordas):
     contornos = cv2.findContours(
         bordas.copy(),
@@ -388,22 +453,27 @@ def processar_folha(caminho_arquivo, total_questoes=None):
         if total_questoes == 30:
             imagens_candidatas = _preparar_candidatos_imagem(original)
 
-            recortes = [
-                _recortar_gabarito_takaoka(imagem_candidata, bordas_candidatas)
-                for _, imagem_candidata, bordas_candidatas in imagens_candidatas
-            ]
+            recortes = []
+            for _, imagem_candidata, bordas_candidatas in imagens_candidatas:
+                recorte_contorno = _recortar_gabarito_takaoka(
+                    imagem_candidata,
+                    bordas_candidatas,
+                )
+
+                if recorte_contorno is not None:
+                    recortes.append(recorte_contorno)
+
+                recortes.extend(_recortes_gabarito_por_faixa_colorida(imagem_candidata))
+
             recortes = [
                 recorte
                 for recorte in recortes
                 if recorte is not None
                 and recorte.shape[0] >= 240
                 and recorte.shape[1] >= 500
+                and 1.45 <= recorte.shape[1] / float(max(recorte.shape[0], 1)) <= 2.60
             ]
-            folha = (
-                max(recortes, key=_pontuar_gabarito_takaoka)
-                if recortes
-                else None
-            )
+            folha = _melhor_recorte_takaoka(recortes, total_questoes)
 
             if folha is not None:
                 folha_cinza, folha_threshold = _preparar_leitura_takaoka(folha)
@@ -626,19 +696,28 @@ def _ler_grade(folha_threshold, total_questoes, grade):
         segundo_maior = ordenadas[1] if len(ordenadas) > 1 else 0
         diferenca = maior_pixels - segundo_maior
         confianca = round(maior_pixels / max(segundo_maior, 1), 2)
+        area_regiao = max((min(x + raio_x, largura) - max(x - raio_x, 0)) * (2 * raio_y), 1)
+        minimo_marcacao = max(int(area_regiao * 0.12), 45)
+        resposta_final = melhor_alternativa
 
-        respostas[questao] = melhor_alternativa
+        if maior_pixels < minimo_marcacao:
+            resposta_final = None
+        elif segundo_maior > 0 and confianca < 1.35 and diferenca < int(minimo_marcacao * 1.8):
+            resposta_final = None
+
+        respostas[questao] = resposta_final
 
         debug.append(
             {
                 "questao": questao,
-                "resposta": melhor_alternativa,
+                "resposta": resposta_final,
                 "bloco": item["bloco"],
                 "contagens": contagens,
                 "maior_pixels": maior_pixels,
                 "segundo_maior_pixels": segundo_maior,
                 "diferenca_pixels": diferenca,
                 "confianca": confianca,
+                "minimo_marcacao": minimo_marcacao,
                 "centro_x": x,
                 "centros_y": linhas,
                 "regioes": regioes,
@@ -806,17 +885,37 @@ def _ler_grade_por_blocos(folha_threshold, blocos_info):
             segundo_maior = ordenadas[1] if len(ordenadas) > 1 else 0
             diferenca = maior_pixels - segundo_maior
             confianca = round(maior_pixels / max(segundo_maior, 1), 2)
-            respostas[questao] = melhor_alternativa
+            area_regiao = max(
+                (
+                    regioes[melhor_alternativa]["x2"]
+                    - regioes[melhor_alternativa]["x1"]
+                )
+                * (
+                    regioes[melhor_alternativa]["y2"]
+                    - regioes[melhor_alternativa]["y1"]
+                ),
+                1,
+            )
+            minimo_marcacao = max(int(area_regiao * 0.12), 45)
+            resposta_final = melhor_alternativa
+
+            if maior_pixels < minimo_marcacao:
+                resposta_final = None
+            elif segundo_maior > 0 and confianca < 1.35 and diferenca < int(minimo_marcacao * 1.8):
+                resposta_final = None
+
+            respostas[questao] = resposta_final
             debug.append(
                 {
                     "questao": questao,
-                    "resposta": melhor_alternativa,
+                    "resposta": resposta_final,
                     "bloco": "detectado",
                     "contagens": contagens,
                     "maior_pixels": maior_pixels,
                     "segundo_maior_pixels": segundo_maior,
                     "diferenca_pixels": diferenca,
                     "confianca": confianca,
+                    "minimo_marcacao": minimo_marcacao,
                     "centro_x": int((regioes[melhor_alternativa]["x1"] + regioes[melhor_alternativa]["x2"]) / 2),
                     "centros_y": {
                         alternativa: int((regiao["y1"] + regiao["y2"]) / 2)
@@ -840,6 +939,50 @@ def _pontuar_debug(debug):
         + sum(min(confianca, 8) for confianca in confiancas)
         + sum(max(diferenca, 0) for diferenca in diferencas) / 100
     )
+
+
+def _melhor_recorte_takaoka(recortes, total_questoes):
+    melhor = None
+
+    for recorte in recortes:
+        try:
+            _, threshold = _preparar_leitura_takaoka(recorte)
+            respostas, debug = _ler_grade_com_tentativas(threshold, total_questoes)
+        except Exception:
+            continue
+
+        respostas_validas = [
+            resposta
+            for resposta in respostas.values()
+            if resposta in {"A", "B", "C", "D"}
+        ]
+        respondidas = len(respostas_validas)
+        vazias = max(total_questoes - respondidas, 0)
+        alternativas_usadas = len(set(respostas_validas))
+        dominante = (
+            max(respostas_validas.count(alternativa) for alternativa in {"A", "B", "C", "D"})
+            if respostas_validas
+            else 0
+        )
+        proporcao = recorte.shape[1] / float(max(recorte.shape[0], 1))
+        penalidade_proporcao = abs(proporcao - 1.9) * 2000
+        pontuacao = (
+            _pontuar_gabarito_takaoka(recorte)
+            + _pontuar_debug(debug)
+            + respondidas * 5000
+            + alternativas_usadas * 1000
+            - vazias * 5000
+            - dominante * 900
+            - penalidade_proporcao
+        )
+
+        if melhor is None or pontuacao > melhor[0]:
+            melhor = (pontuacao, recorte)
+
+    if melhor is not None:
+        return melhor[1]
+
+    return max(recortes, key=_pontuar_gabarito_takaoka) if recortes else None
 
 
 def _ler_grade_com_tentativas(folha_threshold, total_questoes):
