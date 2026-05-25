@@ -399,6 +399,12 @@ def _calcular_nota(acertos: int, total_questoes: int):
 
 
 def _calcular_nota_global_bimestre(db: Session, aluno_id: str, escola_id: str, bimestre: int):
+    total_modelos = (
+        db.query(models.ModeloProva)
+        .filter(models.ModeloProva.escola_id == escola_id)
+        .filter(models.ModeloProva.bimestre == bimestre)
+        .count()
+    )
     resultados = (
         db.query(models.ResultadoAluno)
         .filter(models.ResultadoAluno.aluno_id == aluno_id)
@@ -413,7 +419,11 @@ def _calcular_nota_global_bimestre(db: Session, aluno_id: str, escola_id: str, b
     return {
         "acertos_global": acertos,
         "total_questoes_global": total_questoes,
-        "nota_global": round(sum(notas) / len(notas), 1) if notas else _calcular_nota(acertos, total_questoes),
+        "nota_global": (
+            round(sum(notas) / total_modelos, 1)
+            if total_modelos
+            else _calcular_nota(acertos, total_questoes)
+        ),
     }
 
 
@@ -607,6 +617,7 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
     if not modelos:
         raise HTTPException(status_code=404, detail="Modelo de prova nao encontrado")
 
+    total_modelos = len(modelos)
     modelo_ids = [modelo.id for modelo in modelos]
     turmas = (
         db.query(models.Turma)
@@ -691,10 +702,8 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
         global_aluno = resumo_global.get(aluno_id, {"acertos": 0, "total": 0})
         notas_aluno = global_aluno.get("notas", [])
         nota_global = (
-            round(sum(notas_aluno) / len(notas_aluno), 1)
-            if notas_aluno
-            else _calcular_nota(global_aluno["acertos"], global_aluno["total"])
-            if global_aluno["total"]
+            round(sum(notas_aluno) / total_modelos, 1)
+            if total_modelos
             else None
         )
 
@@ -702,7 +711,7 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
         for disciplina in disciplinas:
             resumo = resumo_disciplinas.get(aluno_id, {}).get(disciplina)
             notas_disciplinas[disciplina] = (
-                _calcular_nota(resumo["acertos"], resumo["total"]) if resumo else None
+                _calcular_nota(resumo["acertos"], resumo["total"]) if resumo else 0
             )
 
         linhas.append(
@@ -714,13 +723,13 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
                 "nota_global": nota_global,
                 "nota_dia_1": next(
                     (resultado.nota_global for resultado in resultados if str(resultado.aluno_id) == aluno_id and resultado.dia == 1),
-                    None,
+                    0,
                 ),
                 "nota_dia_2": next(
                     (resultado.nota_global for resultado in resultados if str(resultado.aluno_id) == aluno_id and resultado.dia == 2),
-                    None,
+                    0,
                 ),
-                "status": "Corrigido" if nota_global is not None else "Pendente",
+                "status": "Corrigido" if notas_aluno else "Pendente",
             }
         )
 
@@ -1238,6 +1247,7 @@ def listar_resultados_alunos(
     if not modelos:
         raise HTTPException(status_code=404, detail="Modelo de prova nao encontrado")
 
+    total_modelos = len(modelos)
     modelo_ids = [modelo.id for modelo in modelos]
     dias_por_modelo = {modelo.id: modelo.dia for modelo in modelos}
 
@@ -1308,8 +1318,8 @@ def listar_resultados_alunos(
     for resumo in globais_por_aluno.values():
         notas = resumo.pop("notas", [])
         resumo["nota_global"] = (
-            round(sum(notas) / len(notas), 1)
-            if notas
+            round(sum(notas) / total_modelos, 1)
+            if total_modelos
             else _calcular_nota(
                 resumo["acertos_global"],
                 resumo["total_questoes_global"],
@@ -1323,7 +1333,7 @@ def listar_resultados_alunos(
             {
                 "acertos_global": resultado.acertos,
                 "total_questoes_global": resultado.total_questoes,
-                "nota_global": resultado.nota_global,
+                "nota_global": round(resultado.nota_global / total_modelos, 1) if total_modelos else resultado.nota_global,
             },
         )
         acertos_linha = resultado.acertos if dia is not None else resumo_global["acertos_global"]
@@ -1355,7 +1365,11 @@ def listar_resultados_alunos(
             {
                 "acertos_global": acertos,
                 "total_questoes_global": total_questoes,
-                "nota_global": _calcular_nota(acertos, total_questoes),
+                "nota_global": (
+                    round(_calcular_nota(acertos, total_questoes) / total_modelos, 1)
+                    if total_modelos
+                    else _calcular_nota(acertos, total_questoes)
+                ),
             },
         )
         linhas_por_aluno[aluno_id] = {
