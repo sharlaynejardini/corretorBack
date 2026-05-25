@@ -22,6 +22,16 @@ UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads" if os.getenv("VERCEL") else 
 ALTERNATIVAS_VALIDAS = {"A", "B", "C", "D", "X"}
 GABARITO_PADRAO = "PADRAO"
 GABARITO_ADAPTADA = "ADAPTADA"
+ORDEM_DISCIPLINAS_RESULTADO = [
+    "PORTUGUES",
+    "HISTORIA",
+    "GEOGRAFIA",
+    "EDUCACAO FISICA",
+    "MATEMATICA",
+    "CIENCIAS",
+    "ARTES",
+    "INGLES",
+]
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -196,6 +206,43 @@ def _normalizar_texto(valor: str):
     texto = unicodedata.normalize("NFKD", valor or "")
     texto = "".join(caractere for caractere in texto if not unicodedata.combining(caractere))
     return texto.upper()
+
+
+def _normalizar_disciplina_ordem(valor: str):
+    texto = _normalizar_texto(valor).replace(".", " ")
+    texto = " ".join(texto.split())
+
+    equivalencias = {
+        "LP": "PORTUGUES",
+        "LINGUA PORTUGUESA": "PORTUGUES",
+        "PORTUGUES": "PORTUGUES",
+        "HIS": "HISTORIA",
+        "HISTORIA": "HISTORIA",
+        "GEO": "GEOGRAFIA",
+        "GEOGRAFIA": "GEOGRAFIA",
+        "EF": "EDUCACAO FISICA",
+        "ED FISICA": "EDUCACAO FISICA",
+        "EDUCACAO FISICA": "EDUCACAO FISICA",
+        "MAT": "MATEMATICA",
+        "MATEMATICA": "MATEMATICA",
+        "CIE": "CIENCIAS",
+        "CIENCIAS": "CIENCIAS",
+        "ARTES": "ARTES",
+        "INGLES": "INGLES",
+    }
+
+    return equivalencias.get(texto, texto)
+
+
+def _ordenar_disciplinas_resultado(disciplinas):
+    def chave(disciplina):
+        disciplina_normalizada = _normalizar_disciplina_ordem(disciplina)
+        try:
+            return (ORDEM_DISCIPLINAS_RESULTADO.index(disciplina_normalizada), disciplina)
+        except ValueError:
+            return (len(ORDEM_DISCIPLINAS_RESULTADO), disciplina)
+
+    return sorted(disciplinas, key=chave)
 
 
 def _codigo_gabarito_turma(nome_escola: str, nome_turma: str, serie: int, dia: int):
@@ -503,7 +550,7 @@ def _montar_excel_resultado_final(escola_nome: str, bimestre: int, disciplinas, 
         *disciplinas,
         "Nota dia 1",
         "Nota dia 2",
-        "Nota global",
+        "Media geral",
         "Status",
     ]
     planilha.append([f"Resultado final - {escola_nome} - {bimestre}º bimestre"])
@@ -615,6 +662,8 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
         resumo_disciplinas[aluno_id][disciplina]["total"] += 1
         if resposta.acertou:
             resumo_disciplinas[aluno_id][disciplina]["acertos"] += 1
+
+    disciplinas = _ordenar_disciplinas_resultado(disciplinas)
 
     resumo_global = {}
     for resultado in resultados:
