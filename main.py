@@ -21,6 +21,7 @@ from processador_imagem import ler_respostas_grade_fixa, processar_folha
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads" if os.getenv("VERCEL") else "uploads")
 ALTERNATIVAS_VALIDAS = {"A", "B", "C", "D", "X"}
 GABARITO_PADRAO = "PADRAO"
+GABARITO_ADAPTADA = "ADAPTADA"
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -164,7 +165,8 @@ def _preparar_banco():
         )
 
 
-_preparar_banco()
+if engine is not None:
+    _preparar_banco()
 
 
 def _buscar_modelo_prova(db: Session, escola_id: str, bimestre: int, dia: int):
@@ -236,6 +238,12 @@ def _buscar_contexto_aluno(db: Session, aluno_id: str, modelo):
     )
 
     return serie, codigo_gabarito
+
+
+def _buscar_contexto_correcao(db: Session, aluno_id: str, modelo, codigo_gabarito: str | None = None):
+    serie, codigo_padrao = _buscar_contexto_aluno(db, aluno_id, modelo)
+    codigo_final = _normalizar_codigo_gabarito(codigo_gabarito) if codigo_gabarito else codigo_padrao
+    return serie, codigo_final
 
 
 def _buscar_gabarito(db: Session, modelo_id, serie: int, codigo_gabarito: str = GABARITO_PADRAO):
@@ -823,10 +831,11 @@ def corrigir_manual(
     bimestre: int = Form(...),
     dia: int = Form(...),
     respostas: str = Form(...),
+    codigo_gabarito: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
-    serie, codigo_gabarito = _buscar_contexto_aluno(db, aluno_id, modelo)
+    serie, codigo_gabarito = _buscar_contexto_correcao(db, aluno_id, modelo, codigo_gabarito)
     gabaritos = _buscar_gabarito(db, modelo.id, serie, codigo_gabarito)
     respostas_lista = [_normalizar_resposta(resposta) for resposta in respostas.split(",") if resposta.strip()]
 
@@ -890,11 +899,12 @@ async def corrigir_foto(
     escola_id: str = Form(...),
     bimestre: int = Form(...),
     dia: int = Form(...),
+    codigo_gabarito: str | None = Form(None),
     foto: UploadFile = File(...),
     db: Session = Depends(get_db),
 ):
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
-    serie, codigo_gabarito = _buscar_contexto_aluno(db, aluno_id, modelo)
+    serie, codigo_gabarito = _buscar_contexto_correcao(db, aluno_id, modelo, codigo_gabarito)
     gabaritos = _buscar_gabarito(db, modelo.id, serie, codigo_gabarito)
     total_questoes = len(gabaritos)
 
@@ -978,10 +988,11 @@ def corrigir_foto_existente(
     bimestre: int = Form(...),
     dia: int = Form(...),
     nome_arquivo: str = Form(...),
+    codigo_gabarito: str | None = Form(None),
     db: Session = Depends(get_db),
 ):
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
-    serie, codigo_gabarito = _buscar_contexto_aluno(db, aluno_id, modelo)
+    serie, codigo_gabarito = _buscar_contexto_correcao(db, aluno_id, modelo, codigo_gabarito)
     gabaritos = _buscar_gabarito(db, modelo.id, serie, codigo_gabarito)
     total_questoes = len(gabaritos)
 
@@ -1579,7 +1590,7 @@ def salvar_nota_adaptada(
             aluno_id,
             modelo,
             serie,
-            GABARITO_PADRAO,
+            GABARITO_ADAPTADA,
             total_acertos,
             total_questoes,
         )
@@ -1605,7 +1616,7 @@ def salvar_nota_adaptada(
         "bimestre": bimestre,
         "dia": dia,
         "serie": serie,
-        "codigo_gabarito": GABARITO_PADRAO,
+        "codigo_gabarito": GABARITO_ADAPTADA,
         "modelo_prova_id": str(modelo.id),
         "respostas_salvas": respostas_salvas,
         "gabarito_lido_tabulado": _tabular_respostas(respostas_salvas),
