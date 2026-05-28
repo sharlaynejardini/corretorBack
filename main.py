@@ -489,6 +489,70 @@ def _salvar_resultado_aluno(
     return nota_dia
 
 
+def _recalcular_resultados_por_gabarito(db: Session, modelo, serie: int, codigo_gabarito: str, gabaritos):
+    resultados = (
+        db.query(models.ResultadoAluno)
+        .filter(models.ResultadoAluno.modelo_prova_id == modelo.id)
+        .filter(models.ResultadoAluno.serie == serie)
+        .filter(models.ResultadoAluno.codigo_gabarito == codigo_gabarito)
+        .all()
+    )
+
+    gabaritos_por_numero = {gabarito.numero_questao: gabarito for gabarito in gabaritos}
+    recalculados = 0
+
+    for resultado in resultados:
+        respostas = (
+            db.query(models.RespostaAluno)
+            .filter(models.RespostaAluno.aluno_id == resultado.aluno_id)
+            .filter(models.RespostaAluno.modelo_prova_id == modelo.id)
+            .order_by(models.RespostaAluno.numero_questao)
+            .all()
+        )
+
+        if not respostas:
+            continue
+
+        respostas_por_numero = {resposta.numero_questao: resposta for resposta in respostas}
+        acertos = 0
+
+        for numero_questao, gabarito in gabaritos_por_numero.items():
+            resposta = respostas_por_numero.get(numero_questao)
+            resposta_correta = _normalizar_resposta(gabarito.resposta_correta)
+
+            if not resposta:
+                resposta = models.RespostaAluno(
+                    aluno_id=resultado.aluno_id,
+                    modelo_prova_id=modelo.id,
+                    numero_questao=numero_questao,
+                    resposta_aluno=None,
+                )
+                db.add(resposta)
+
+            resposta.disciplina = gabarito.disciplina
+            resposta.resposta_correta = resposta_correta
+            resposta.acertou = (
+                True
+                if _questao_anulada(resposta_correta)
+                else _normalizar_resposta(resposta.resposta_aluno) == resposta_correta
+            )
+
+            if resposta.acertou:
+                acertos += 1
+
+        resultado.escola_id = modelo.escola_id
+        resultado.bimestre = modelo.bimestre
+        resultado.dia = modelo.dia
+        resultado.serie = serie
+        resultado.codigo_gabarito = codigo_gabarito
+        resultado.acertos = acertos
+        resultado.total_questoes = len(gabaritos_por_numero)
+        resultado.nota_global = _calcular_nota(acertos, resultado.total_questoes)
+        recalculados += 1
+
+    return recalculados
+
+
 def _tabular_respostas(respostas):
     respostas_ordenadas = sorted(
         respostas,
@@ -842,20 +906,28 @@ def salvar_gabarito(
 
         for disciplina in disciplinas:
             for _ in range(disciplina.quantidade_questoes):
-                db.add(
-                    models.Gabarito(
-                        modelo_prova_id=modelo.id,
-                        serie=serie,
-                        codigo_gabarito=codigo_gabarito,
-                        numero_questao=numero_questao,
-                        disciplina=disciplina.disciplina,
-                        resposta_correta=respostas_lista[indice_resposta],
-                    )
+                gabarito = models.Gabarito(
+                    modelo_prova_id=modelo.id,
+                    serie=serie,
+                    codigo_gabarito=codigo_gabarito,
+                    numero_questao=numero_questao,
+                    disciplina=disciplina.disciplina,
+                    resposta_correta=respostas_lista[indice_resposta],
                 )
+                db.add(gabarito)
 
                 numero_questao += 1
                 indice_resposta += 1
 
+        db.flush()
+        gabaritos_salvos = _buscar_gabarito(db, modelo.id, serie, codigo_gabarito)
+        resultados_recalculados = _recalcular_resultados_por_gabarito(
+            db,
+            modelo,
+            serie,
+            codigo_gabarito,
+            gabaritos_salvos,
+        )
         db.commit()
     except SQLAlchemyError as exc:
         db.rollback()
@@ -866,6 +938,7 @@ def salvar_gabarito(
         "serie": serie,
         "codigo_gabarito": codigo_gabarito,
         "total_questoes": total_esperado,
+        "resultados_recalculados": resultados_recalculados,
     }
 
 
