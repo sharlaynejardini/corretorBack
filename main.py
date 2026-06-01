@@ -398,7 +398,19 @@ def _calcular_nota(acertos: int, total_questoes: int):
     return round((acertos / total_questoes) * 10, 1) if total_questoes else 0
 
 
+def _calcular_media_notas_disciplinas(notas_disciplinas):
+    notas = [nota for nota in notas_disciplinas.values() if nota is not None]
+    return round(sum(notas) / len(notas), 1) if notas else 0
+
+
 def _calcular_nota_global_bimestre(db: Session, aluno_id: str, escola_id: str, bimestre: int):
+    modelos = (
+        db.query(models.ModeloProva)
+        .filter(models.ModeloProva.escola_id == escola_id)
+        .filter(models.ModeloProva.bimestre == bimestre)
+        .all()
+    )
+    modelo_ids = [modelo.id for modelo in modelos]
     resultados = (
         db.query(models.ResultadoAluno)
         .filter(models.ResultadoAluno.aluno_id == aluno_id)
@@ -408,11 +420,48 @@ def _calcular_nota_global_bimestre(db: Session, aluno_id: str, escola_id: str, b
     )
     acertos = sum(resultado.acertos for resultado in resultados)
     total_questoes = sum(resultado.total_questoes for resultado in resultados)
+    disciplinas = (
+        db.query(models.DisciplinaProva)
+        .filter(models.DisciplinaProva.modelo_prova_id.in_(modelo_ids))
+        .order_by(models.DisciplinaProva.ordem)
+        .all()
+        if modelo_ids
+        else []
+    )
+    nomes_disciplinas = []
+    for disciplina in disciplinas:
+        if disciplina.disciplina not in nomes_disciplinas:
+            nomes_disciplinas.append(disciplina.disciplina)
+
+    respostas = (
+        db.query(models.RespostaAluno)
+        .filter(models.RespostaAluno.aluno_id == aluno_id)
+        .filter(models.RespostaAluno.modelo_prova_id.in_(modelo_ids))
+        .all()
+        if modelo_ids
+        else []
+    )
+    resumo_disciplinas = {
+        disciplina: {"acertos": 0, "total": 0}
+        for disciplina in nomes_disciplinas
+    }
+    for resposta in respostas:
+        disciplina = resposta.disciplina or "Sem disciplina"
+        if disciplina not in resumo_disciplinas:
+            resumo_disciplinas[disciplina] = {"acertos": 0, "total": 0}
+        resumo_disciplinas[disciplina]["total"] += 1
+        if resposta.acertou:
+            resumo_disciplinas[disciplina]["acertos"] += 1
+
+    notas_disciplinas = {
+        disciplina: _calcular_nota(resumo["acertos"], resumo["total"]) if resumo["total"] else 0
+        for disciplina, resumo in resumo_disciplinas.items()
+    }
 
     return {
         "acertos_global": acertos,
         "total_questoes_global": total_questoes,
-        "nota_global": _calcular_nota(acertos, total_questoes),
+        "nota_global": _calcular_media_notas_disciplinas(notas_disciplinas),
     }
 
 
@@ -611,8 +660,6 @@ def _montar_excel_resultado_final(escola_nome: str, bimestre: int, disciplinas, 
         "Nº",
         "Aluno",
         *disciplinas,
-        "Nota dia 1",
-        "Nota dia 2",
         "Media geral",
         "Status",
     ]
@@ -627,8 +674,6 @@ def _montar_excel_resultado_final(escola_nome: str, bimestre: int, disciplinas, 
                 linha["numero_chamada"],
                 linha["aluno"],
                 *[_valor_planilha(linha["disciplinas"].get(disciplina)) for disciplina in disciplinas],
-                _valor_planilha(linha.get("nota_dia_1")),
-                _valor_planilha(linha.get("nota_dia_2")),
                 _valor_planilha(linha["nota_global"]),
                 linha["status"],
             ]
@@ -707,7 +752,19 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
         else []
     )
 
+    disciplinas_modelo = (
+        db.query(models.DisciplinaProva)
+        .filter(models.DisciplinaProva.modelo_prova_id.in_(modelo_ids))
+        .order_by(models.DisciplinaProva.ordem)
+        .all()
+        if modelo_ids
+        else []
+    )
     disciplinas = []
+    for disciplina in disciplinas_modelo:
+        if disciplina.disciplina not in disciplinas:
+            disciplinas.append(disciplina.disciplina)
+
     resumo_disciplinas = {}
     for resposta in respostas:
         aluno_id = str(resposta.aluno_id)
@@ -750,7 +807,6 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
         aluno_id = str(aluno.id)
         turma = turma_por_id.get(aluno.turma_id)
         global_aluno = resumo_global.get(aluno_id, {"acertos": 0, "total": 0})
-        nota_global = _calcular_nota(global_aluno["acertos"], global_aluno["total"])
 
         notas_disciplinas = {}
         for disciplina in disciplinas:
@@ -758,6 +814,7 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
             notas_disciplinas[disciplina] = (
                 _calcular_nota(resumo["acertos"], resumo["total"]) if resumo else 0
             )
+        nota_global = _calcular_media_notas_disciplinas(notas_disciplinas)
 
         linhas.append(
             {
@@ -766,14 +823,6 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
                 "aluno": aluno.nome,
                 "disciplinas": notas_disciplinas,
                 "nota_global": nota_global,
-                "nota_dia_1": next(
-                    (resultado.nota_global for resultado in resultados if str(resultado.aluno_id) == aluno_id and resultado.dia == 1),
-                    0,
-                ),
-                "nota_dia_2": next(
-                    (resultado.nota_global for resultado in resultados if str(resultado.aluno_id) == aluno_id and resultado.dia == 2),
-                    0,
-                ),
                 "status": "Corrigido" if global_aluno["total"] else "Pendente",
             }
         )
@@ -1342,6 +1391,38 @@ def listar_resultados_alunos(
             _resposta_aluno_para_dict(resposta)
         )
 
+    disciplinas_modelo = (
+        db.query(models.DisciplinaProva)
+        .filter(models.DisciplinaProva.modelo_prova_id.in_(modelo_ids))
+        .order_by(models.DisciplinaProva.ordem)
+        .all()
+        if modelo_ids
+        else []
+    )
+    nomes_disciplinas = []
+    for disciplina in disciplinas_modelo:
+        if disciplina.disciplina not in nomes_disciplinas:
+            nomes_disciplinas.append(disciplina.disciplina)
+
+    def calcular_media_disciplinas_respostas(respostas_aluno):
+        resumo_disciplinas = {
+            disciplina: {"acertos": 0, "total": 0}
+            for disciplina in nomes_disciplinas
+        }
+        for resposta in respostas_aluno:
+            disciplina = resposta["disciplina"] or "Sem disciplina"
+            if disciplina not in resumo_disciplinas:
+                resumo_disciplinas[disciplina] = {"acertos": 0, "total": 0}
+            resumo_disciplinas[disciplina]["total"] += 1
+            if resposta["acertou"]:
+                resumo_disciplinas[disciplina]["acertos"] += 1
+
+        notas_disciplinas = {
+            disciplina: _calcular_nota(resumo["acertos"], resumo["total"]) if resumo["total"] else 0
+            for disciplina, resumo in resumo_disciplinas.items()
+        }
+        return _calcular_media_notas_disciplinas(notas_disciplinas)
+
     linhas_por_aluno = {}
     globais_por_aluno = {}
     dias_por_aluno = {}
@@ -1365,10 +1446,9 @@ def listar_resultados_alunos(
             "codigo_gabarito": resultado.codigo_gabarito,
         }
 
-    for resumo in globais_por_aluno.values():
-        resumo["nota_global"] = _calcular_nota(
-            resumo["acertos_global"],
-            resumo["total_questoes_global"],
+    for aluno_id, resumo in globais_por_aluno.items():
+        resumo["nota_global"] = calcular_media_disciplinas_respostas(
+            respostas_por_aluno.get(aluno_id, [])
         )
 
     for resultado in resultados:
@@ -1378,7 +1458,9 @@ def listar_resultados_alunos(
             {
                 "acertos_global": resultado.acertos,
                 "total_questoes_global": resultado.total_questoes,
-                "nota_global": _calcular_nota(resultado.acertos, resultado.total_questoes),
+                "nota_global": calcular_media_disciplinas_respostas(
+                    respostas_por_aluno.get(aluno_id, [])
+                ),
             },
         )
         acertos_linha = resultado.acertos if dia is not None else resumo_global["acertos_global"]
@@ -1410,7 +1492,7 @@ def listar_resultados_alunos(
             {
                 "acertos_global": acertos,
                 "total_questoes_global": total_questoes,
-                "nota_global": _calcular_nota(acertos, total_questoes),
+                "nota_global": calcular_media_disciplinas_respostas(respostas_salvas),
             },
         )
         linhas_por_aluno[aluno_id] = {
