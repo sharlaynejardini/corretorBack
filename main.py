@@ -245,9 +245,16 @@ def _ordenar_disciplinas_resultado(disciplinas):
     return sorted(disciplinas, key=chave)
 
 
-def _codigo_gabarito_turma(nome_escola: str, nome_turma: str, serie: int, dia: int):
+def _codigo_gabarito_turma(nome_escola: str, nome_turma: str, serie: int, bimestre: int, dia: int):
     escola_normalizada = _normalizar_texto(nome_escola)
     turma_normalizada = _normalizar_texto(nome_turma).replace(" ", "")
+
+    if "AGENOR" in escola_normalizada and bimestre == 2:
+        if dia == 1:
+            return "CADERNO_A"
+
+        if dia == 2:
+            return "CADERNO_B"
 
     if "TAKAOKA" in escola_normalizada and serie == 8 and dia == 1:
         if "8B" in turma_normalizada:
@@ -281,6 +288,7 @@ def _buscar_contexto_aluno(db: Session, aluno_id: str, modelo):
         escola.nome if escola else "",
         turma.nome if turma else "",
         serie,
+        modelo.bimestre,
         modelo.dia,
     )
 
