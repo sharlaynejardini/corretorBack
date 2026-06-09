@@ -584,12 +584,12 @@ def _distribuir_centros(largura, quantidade, inicio, fim):
 
 
 def _centros_questoes(largura, total_questoes):
-    if total_questoes == 22:
+    if total_questoes in {22, 25}:
         grupos = [
             (10, 0.022, 0.380),
-            (4, 0.462, 0.582),
-            (4, 0.662, 0.782),
-            (4, 0.862, 0.982),
+            (4 if total_questoes == 22 else 5, 0.462, 0.582),
+            (4 if total_questoes == 22 else 5, 0.662, 0.782),
+            (4 if total_questoes == 22 else 5, 0.862, 0.982),
         ]
     else:
         margem = 0.035
@@ -1037,15 +1037,16 @@ def _melhor_recorte_takaoka(recortes, total_questoes):
 def _ler_grade_com_tentativas(folha_threshold, total_questoes):
     altura, largura = folha_threshold.shape
 
-    if total_questoes != 30:
+    if total_questoes not in {25, 30}:
         grade = _grade_questoes(largura, altura, total_questoes)
         return _ler_grade(folha_threshold, total_questoes, grade)
 
-    blocos_info = _detectar_blocos_grade(folha_threshold)
-    if blocos_info is not None:
-        leitura_blocos = _ler_grade_por_blocos(folha_threshold, blocos_info)
-        if leitura_blocos is not None:
-            return leitura_blocos
+    if total_questoes == 30:
+        blocos_info = _detectar_blocos_grade(folha_threshold)
+        if blocos_info is not None:
+            leitura_blocos = _ler_grade_por_blocos(folha_threshold, blocos_info)
+            if leitura_blocos is not None:
+                return leitura_blocos
 
     melhor = None
     deslocamentos_x = [0, -8, 8, -14, 14]
@@ -1090,7 +1091,8 @@ def ler_respostas_grade_fixa(folha_threshold, total_questoes=22):
     Le respostas de uma grade fixa com alternativas A/B/C/D.
 
     O total de questoes deve vir do gabarito oficial:
-    - 22 para EMEF DEP. AGENOR LINO DE MATTOS
+    - 22 para EMEF DEP. AGENOR LINO DE MATTOS no 1o bimestre
+    - 25 para EMEF DEP. AGENOR LINO DE MATTOS no 2o bimestre
     - 30 para EMEF YOJIRO TAKAOKA
     """
     if folha_threshold is None:

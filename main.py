@@ -660,7 +660,7 @@ def _montar_excel_resultado_final(escola_nome: str, bimestre: int, disciplinas, 
         "Nº",
         "Aluno",
         *disciplinas,
-        "Media geral",
+        "Media Global",
         "Status",
     ]
     planilha.append([f"Resultado final - {escola_nome} - {bimestre}º bimestre"])
@@ -1531,7 +1531,7 @@ def baixar_resultado_final_excel(
 
     disciplinas, linhas = _montar_resultado_final_escola(db, escola_id, bimestre)
     arquivo = _montar_excel_resultado_final(escola.nome, bimestre, disciplinas, linhas)
-    arquivo.write(";".join(["Turma", "Nº", "Aluno", *disciplinas, "Nota global", "Status"]))
+    arquivo.write(";".join(["Turma", "Nº", "Aluno", *disciplinas, "Media Global", "Status"]))
 
     for linha in linhas:
         valores = [
