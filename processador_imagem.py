@@ -635,7 +635,146 @@ def _linhas_takaoka(altura, topo=True):
     }
 
 
+def _detectar_area_gabarito_agenor(folha_threshold):
+    altura, largura = folha_threshold.shape
+    kernel_vertical = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (1, max(int(altura * 0.018), 10)),
+    )
+    kernel_horizontal = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (max(int(largura * 0.025), 14), 1),
+    )
+    linhas = cv2.add(
+        cv2.morphologyEx(folha_threshold, cv2.MORPH_OPEN, kernel_vertical),
+        cv2.morphologyEx(folha_threshold, cv2.MORPH_OPEN, kernel_horizontal),
+    )
+    contornos = cv2.findContours(
+        linhas.copy(),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    contornos = imutils.grab_contours(contornos)
+    candidatos = []
+
+    for contorno in contornos:
+        x, y, w, h = cv2.boundingRect(contorno)
+        area = w * h
+        proporcao = w / float(max(h, 1))
+
+        if (
+            largura * 0.55 <= w <= largura * 0.90
+            and altura * 0.24 <= h <= altura * 0.45
+            and altura * 0.22 <= y <= altura * 0.55
+            and 1.35 <= proporcao <= 2.35
+        ):
+            candidatos.append((area, x, y, w, h))
+
+    if not candidatos:
+        return None
+
+    _, x, y, w, h = max(candidatos, key=lambda item: item[0])
+    margem_x = int(w * 0.015)
+    margem_y = int(h * 0.015)
+
+    return (
+        max(x - margem_x, 0),
+        max(y - margem_y, 0),
+        min(w + (2 * margem_x), largura - x),
+        min(h + (2 * margem_y), altura - y),
+    )
+
+
+def _grade_questoes_agenor(largura, altura, area_gabarito, ajuste_x=0, ajuste_y=0, escala_x=1.0, escala_y=1.0):
+    x0, y0, area_largura, area_altura = area_gabarito
+    blocos = [
+        (1, 10, 0.102, 0.554, [0.286, 0.365, 0.444, 0.524], "portugues"),
+        (11, 5, 0.678, 0.895, [0.286, 0.365, 0.444, 0.524], "historia"),
+        (16, 5, 0.203, 0.413, [0.714, 0.791, 0.868, 0.947], "geografia"),
+        (21, 5, 0.535, 0.748, [0.714, 0.791, 0.868, 0.947], "ed_fisica"),
+    ]
+    grade = []
+
+    for questao_inicial, quantidade, inicio, fim, linhas, bloco in blocos:
+        passo = (fim - inicio) / max(quantidade - 1, 1)
+        raio_x = max(int(area_largura * passo * 0.35), 6)
+        raio_y = max(int(area_altura * 0.030), 6)
+        centros_y_base = {
+            alternativa: y0 + (area_altura * proporcao)
+            for alternativa, proporcao in zip(("A", "B", "C", "D"), linhas)
+        }
+
+        for deslocamento, x_relativo in enumerate(_distribuir_centros(area_largura, quantidade, inicio, fim)):
+            x = x0 + x_relativo
+            x_ajustado = int((x - (largura / 2)) * escala_x + (largura / 2) + ajuste_x)
+            centros_y = {
+                alternativa: min(
+                    max(int((y - (altura / 2)) * escala_y + (altura / 2) + ajuste_y), 0),
+                    altura - 1,
+                )
+                for alternativa, y in centros_y_base.items()
+            }
+
+            grade.append(
+                {
+                    "questao": questao_inicial + deslocamento,
+                    "x": min(max(x_ajustado, 0), largura - 1),
+                    "linhas": centros_y,
+                    "bloco": bloco,
+                    "raio_x": raio_x,
+                    "raio_y": raio_y,
+                    "fator_minimo_marcacao": 0.07,
+                    "minimo_marcacao_absoluto": 22,
+                }
+            )
+
+    return grade
+
+
 def _grade_questoes(largura, altura, total_questoes, ajuste_x=0, ajuste_y=0, escala_x=1.0, escala_y=1.0):
+    if total_questoes == 25:
+        blocos = [
+            (1, 10, 0.203, 0.539, [0.389, 0.416, 0.442, 0.469], "portugues"),
+            (11, 5, 0.633, 0.792, [0.389, 0.416, 0.442, 0.469], "historia"),
+            (16, 5, 0.278, 0.434, [0.533, 0.559, 0.585, 0.612], "geografia"),
+            (21, 5, 0.525, 0.684, [0.533, 0.559, 0.585, 0.612], "ed_fisica"),
+        ]
+        grade = []
+
+        for questao_inicial, quantidade, inicio, fim, linhas, bloco in blocos:
+            passo = (fim - inicio) / max(quantidade - 1, 1)
+            raio_x = max(int(largura * passo * 0.35), 6)
+            raio_y = max(int(altura * 0.010), 6)
+            centros_y_base = {
+                alternativa: altura * proporcao
+                for alternativa, proporcao in zip(("A", "B", "C", "D"), linhas)
+            }
+
+            for deslocamento, x in enumerate(_distribuir_centros(largura, quantidade, inicio, fim)):
+                x_ajustado = int((x - (largura / 2)) * escala_x + (largura / 2) + ajuste_x)
+                centros_y = {
+                    alternativa: min(
+                        max(int((y - (altura / 2)) * escala_y + (altura / 2) + ajuste_y), 0),
+                        altura - 1,
+                    )
+                    for alternativa, y in centros_y_base.items()
+                }
+
+                grade.append(
+                    {
+                        "questao": questao_inicial + deslocamento,
+                        "x": min(max(x_ajustado, 0), largura - 1),
+                        "linhas": centros_y,
+                        "bloco": bloco,
+                        "raio_x": raio_x,
+                        "raio_y": raio_y,
+                        "fator_minimo_marcacao": 0.07,
+                        "minimo_marcacao_absoluto": 22,
+                    }
+                )
+
+        return grade
+
     if total_questoes != 30:
         linhas = _linhas_alternativas(altura)
         return [
@@ -736,7 +875,9 @@ def _ler_grade(folha_threshold, total_questoes, grade):
         diferenca = maior_pixels - segundo_maior
         confianca = round(maior_pixels / max(segundo_maior, 1), 2)
         area_regiao = max((min(x + raio_x, largura) - max(x - raio_x, 0)) * (2 * raio_y), 1)
-        minimo_marcacao = max(int(area_regiao * 0.12), 45)
+        fator_minimo = item.get("fator_minimo_marcacao", 0.12)
+        minimo_absoluto = item.get("minimo_marcacao_absoluto", 45)
+        minimo_marcacao = max(int(area_regiao * fator_minimo), minimo_absoluto)
         resposta_final = melhor_alternativa
 
         if maior_pixels < minimo_marcacao:
@@ -1040,6 +1181,61 @@ def _ler_grade_com_tentativas(folha_threshold, total_questoes):
     if total_questoes not in {25, 30}:
         grade = _grade_questoes(largura, altura, total_questoes)
         return _ler_grade(folha_threshold, total_questoes, grade)
+
+    if total_questoes == 25:
+        area_gabarito = _detectar_area_gabarito_agenor(folha_threshold)
+        if area_gabarito is not None:
+            melhor_agenor = None
+            deslocamentos_x = [0, -6, 6, -10, 10]
+            deslocamentos_y = [0, -4, 4, -8, 8]
+            escalas_x = [1.0, 0.99, 1.01]
+            escalas_y = [1.0, 0.99, 1.01]
+
+            for ajuste_x in deslocamentos_x:
+                for ajuste_y in deslocamentos_y:
+                    for escala_x in escalas_x:
+                        for escala_y in escalas_y:
+                            grade = _grade_questoes_agenor(
+                                largura,
+                                altura,
+                                area_gabarito,
+                                ajuste_x=ajuste_x,
+                                ajuste_y=ajuste_y,
+                                escala_x=escala_x,
+                                escala_y=escala_y,
+                            )
+                            respostas, debug = _ler_grade(folha_threshold, total_questoes, grade)
+                            pontuacao = _pontuar_debug(debug)
+
+                            if melhor_agenor is None or pontuacao > melhor_agenor[0]:
+                                melhor_agenor = (
+                                    pontuacao,
+                                    respostas,
+                                    debug,
+                                    ajuste_x,
+                                    ajuste_y,
+                                    escala_x,
+                                    escala_y,
+                                )
+
+            _, respostas, debug, ajuste_x, ajuste_y, escala_x, escala_y = melhor_agenor
+
+            for item in debug:
+                item["tentativa_grade"] = {
+                    "metodo": "area_gabarito_agenor",
+                    "area_gabarito": {
+                        "x": area_gabarito[0],
+                        "y": area_gabarito[1],
+                        "w": area_gabarito[2],
+                        "h": area_gabarito[3],
+                    },
+                    "ajuste_x": ajuste_x,
+                    "ajuste_y": ajuste_y,
+                    "escala_x": escala_x,
+                    "escala_y": escala_y,
+                }
+
+            return respostas, debug
 
     if total_questoes == 30:
         blocos_info = _detectar_blocos_grade(folha_threshold)
