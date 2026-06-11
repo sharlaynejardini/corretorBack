@@ -549,6 +549,18 @@ def processar_folha(caminho_arquivo, total_questoes=None):
             return None, "Nao consegui encontrar o contorno da folha"
 
         folha = max(candidatos, key=_pontuar_folha_generica)
+        if total_questoes == 25:
+            altura_folha, largura_folha = folha.shape[:2]
+            proporcao_recorte = max(altura_folha, largura_folha) / float(
+                max(min(altura_folha, largura_folha), 1)
+            )
+
+            if proporcao_recorte < 1.50:
+                return (
+                    None,
+                    "Aproxime a foto do gabarito do Agenor para a leitura automatica.",
+                )
+
         folha_cinza, folha_threshold = _limiarizar_folha(folha)
 
         return {
