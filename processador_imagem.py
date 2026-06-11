@@ -531,6 +531,17 @@ def processar_folha(caminho_arquivo, total_questoes=None):
 
             candidatos.extend(_candidatos_folha_por_contorno(imagem_candidata, bordas_candidatas))
 
+        if not candidatos and total_questoes == 25:
+            for _, imagem_candidata, bordas_candidatas in _preparar_candidatos_imagem(
+                original,
+                incluir_inclinacoes=True,
+            ):
+                folha = _corrigir_perspectiva_folha(imagem_candidata, bordas_candidatas)
+                if folha is not None:
+                    candidatos.append(folha)
+
+                candidatos.extend(_candidatos_folha_por_contorno(imagem_candidata, bordas_candidatas))
+
         candidatos = [_normalizar_orientacao_retrato(candidato) for candidato in candidatos]
         candidatos = [candidato for candidato in candidatos if candidato is not None]
 
@@ -1109,6 +1120,103 @@ def _ler_grade_por_blocos(folha_threshold, blocos_info):
     return respostas, debug
 
 
+def _ler_grade_agenor_recorte(folha_threshold):
+    imagem = folha_threshold
+
+    if imagem.shape[0] > imagem.shape[1]:
+        imagem = cv2.rotate(imagem, cv2.ROTATE_90_COUNTERCLOCKWISE)
+
+    altura, largura = imagem.shape
+    proporcao = largura / float(max(altura, 1))
+
+    if not 1.50 <= proporcao <= 1.90:
+        return None
+
+    largura_base = 631
+    altura_base = 370
+    escala_x = largura / largura_base
+    escala_y = altura / altura_base
+    margem_x = max(int(4 * escala_x), 2)
+    margem_y = max(int(4 * escala_y), 2)
+    blocos = [
+        (1, 10, [39, 74, 109, 144, 179, 214, 249, 284, 319, 354, 389], [93, 116, 139, 162, 185], "portugues"),
+        (11, 5, [418, 453, 488, 523, 558, 596], [93, 116, 139, 162, 185], "historia"),
+        (16, 5, [104, 139, 174, 209, 244, 281], [252, 276, 300, 324, 348], "geografia"),
+        (21, 5, [314, 349, 384, 419, 454, 492], [252, 276, 300, 324, 348], "ed_fisica"),
+    ]
+    respostas = {}
+    debug = []
+
+    for questao_inicial, quantidade, limites_x, limites_y, bloco in blocos:
+        limites_x = [int(x * escala_x) for x in limites_x]
+        limites_y = [int(y * escala_y) for y in limites_y]
+
+        for deslocamento in range(quantidade):
+            questao = questao_inicial + deslocamento
+            contagens = {}
+            regioes = {}
+
+            for indice_alternativa, alternativa in enumerate(("A", "B", "C", "D")):
+                x1 = max(limites_x[deslocamento] + margem_x, 0)
+                x2 = min(limites_x[deslocamento + 1] - margem_x, largura)
+                y1 = max(limites_y[indice_alternativa] + margem_y, 0)
+                y2 = min(limites_y[indice_alternativa + 1] - margem_y, altura)
+
+                if x2 <= x1 or y2 <= y1:
+                    pixels = 0
+                else:
+                    pixels = int(cv2.countNonZero(imagem[y1:y2, x1:x2]))
+
+                contagens[alternativa] = pixels
+                regioes[alternativa] = {
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                }
+
+            melhor_alternativa = max(contagens, key=contagens.get)
+            ordenadas = sorted(contagens.values(), reverse=True)
+            maior_pixels = ordenadas[0] if ordenadas else 0
+            segundo_maior = ordenadas[1] if len(ordenadas) > 1 else 0
+            diferenca = maior_pixels - segundo_maior
+            confianca = round(maior_pixels / max(segundo_maior, 1), 2)
+            minimo_marcacao = max(int(60 * escala_x * escala_y), 28)
+            resposta_final = melhor_alternativa
+
+            if maior_pixels < minimo_marcacao:
+                resposta_final = None
+            elif segundo_maior > 0 and confianca < 1.25:
+                resposta_final = None
+
+            respostas[questao] = resposta_final
+            debug.append(
+                {
+                    "questao": questao,
+                    "resposta": resposta_final,
+                    "bloco": bloco,
+                    "contagens": contagens,
+                    "maior_pixels": maior_pixels,
+                    "segundo_maior_pixels": segundo_maior,
+                    "diferenca_pixels": diferenca,
+                    "confianca": confianca,
+                    "minimo_marcacao": minimo_marcacao,
+                    "centro_x": int((regioes[melhor_alternativa]["x1"] + regioes[melhor_alternativa]["x2"]) / 2),
+                    "centros_y": {
+                        alternativa: int((regiao["y1"] + regiao["y2"]) / 2)
+                        for alternativa, regiao in regioes.items()
+                    },
+                    "regioes": regioes,
+                    "tentativa_grade": {
+                        "metodo": "recorte_agenor_25",
+                        "proporcao": proporcao,
+                    },
+                }
+            )
+
+    return respostas, debug
+
+
 def _pontuar_debug(debug):
     confiancas = [item["confianca"] for item in debug]
     diferencas = [item["diferenca_pixels"] for item in debug]
@@ -1183,6 +1291,10 @@ def _ler_grade_com_tentativas(folha_threshold, total_questoes):
         return _ler_grade(folha_threshold, total_questoes, grade)
 
     if total_questoes == 25:
+        leitura_recorte_agenor = _ler_grade_agenor_recorte(folha_threshold)
+        if leitura_recorte_agenor is not None:
+            return leitura_recorte_agenor
+
         area_gabarito = _detectar_area_gabarito_agenor(folha_threshold)
         if area_gabarito is not None:
             melhor_agenor = None
