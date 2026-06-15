@@ -245,6 +245,23 @@ def _ordenar_disciplinas_resultado(disciplinas):
     return sorted(disciplinas, key=chave)
 
 
+def _montar_status_resultado_final(escola_nome: str, dias_modelo, dias_corrigidos):
+    if not dias_corrigidos:
+        return "Pendente"
+
+    dias_modelo = sorted({int(dia) for dia in dias_modelo if dia is not None})
+    dias_corrigidos = {int(dia) for dia in dias_corrigidos if dia is not None}
+    dias_faltantes = [dia for dia in dias_modelo if dia not in dias_corrigidos]
+
+    if len(dias_modelo) > 1 and len(dias_faltantes) == 1:
+        return f"Falta Dia {dias_faltantes[0]}"
+
+    if len(dias_modelo) > 1 and len(dias_faltantes) > 1:
+        return "Faltam Dias " + ", ".join(str(dia) for dia in dias_faltantes)
+
+    return "Corrigido"
+
+
 def _codigo_gabarito_turma(nome_escola: str, nome_turma: str, serie: int, bimestre: int, dia: int):
     escola_normalizada = _normalizar_texto(nome_escola)
     turma_normalizada = _normalizar_texto(nome_turma).replace(" ", "")
@@ -712,6 +729,8 @@ def _montar_excel_resultado_final(escola_nome: str, bimestre: int, disciplinas, 
 
 
 def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
+    escola = db.query(models.Escola).filter(models.Escola.id == escola_id).first()
+    escola_nome = escola.nome if escola else ""
     modelos = (
         db.query(models.ModeloProva)
         .filter(models.ModeloProva.escola_id == escola_id)
@@ -724,6 +743,7 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
         raise HTTPException(status_code=404, detail="Modelo de prova nao encontrado")
 
     modelo_ids = [modelo.id for modelo in modelos]
+    dias_modelo = [modelo.dia for modelo in modelos]
     turmas = (
         db.query(models.Turma)
         .filter(models.Turma.escola_id == escola_id)
@@ -794,6 +814,7 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
     disciplinas = _ordenar_disciplinas_resultado(disciplinas)
 
     resumo_global = {}
+    dias_corrigidos_por_aluno = {}
     for resultado in resultados:
         aluno_id = str(resultado.aluno_id)
 
@@ -802,6 +823,7 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
 
         resumo_global[aluno_id]["acertos"] += resultado.acertos
         resumo_global[aluno_id]["total"] += resultado.total_questoes
+        dias_corrigidos_por_aluno.setdefault(aluno_id, set()).add(resultado.dia)
 
     linhas = []
     for aluno in sorted(
@@ -831,7 +853,11 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
                 "aluno": aluno.nome,
                 "disciplinas": notas_disciplinas,
                 "nota_global": nota_global,
-                "status": "Corrigido" if global_aluno["total"] else "Pendente",
+                "status": _montar_status_resultado_final(
+                    escola_nome,
+                    dias_modelo,
+                    dias_corrigidos_por_aluno.get(aluno_id, set()),
+                ),
             }
         )
 
@@ -1485,6 +1511,7 @@ def listar_resultados_alunos(
             "total_questoes": total_linha,
             "nota_dia": resultado.nota_global if dia is not None else None,
             **resumo_global,
+            "dias_modelo": sorted({modelo.dia for modelo in modelos}),
             "resultados_dias": dias_por_aluno.get(aluno_id, {}),
             "respostas_salvas": respostas_por_aluno.get(aluno_id, []),
         }
@@ -1514,6 +1541,7 @@ def listar_resultados_alunos(
             "total_questoes": total_questoes,
             "nota_dia": _calcular_nota(acertos, total_questoes),
             **resumo_global,
+            "dias_modelo": sorted({modelo.dia for modelo in modelos}),
             "resultados_dias": dias_por_aluno.get(aluno_id, {}),
             "respostas_salvas": respostas_salvas,
         }
