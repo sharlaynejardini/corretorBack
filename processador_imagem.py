@@ -1391,6 +1391,37 @@ def _ler_grade_daniela_14(folha_threshold):
 
     for item in debug:
         item["tentativa_grade"]["metodo"] = "daniela_14"
+        questao = item.get("questao")
+        if questao is None or questao > 14:
+            continue
+
+        contagens = item.get("contagens", {})
+        resposta = item.get("resposta")
+        regioes = item.get("regioes", {})
+        regiao_d = regioes.get("D")
+
+        if resposta == "D" and contagens.get("C", 0) >= contagens.get("D", 0) * 0.55:
+            item["resposta"] = "C"
+            respostas[questao] = "C"
+
+        if not regioes:
+            continue
+
+        if not regiao_d:
+            continue
+
+        coluna_x1 = min(regiao["x1"] for regiao in regioes.values())
+        coluna_x2 = max(regiao["x2"] for regiao in regioes.values())
+        altura_linha = regiao_d["y2"] - regiao_d["y1"]
+        y1 = regiao_d["y2"]
+        y2 = min(folha_threshold.shape[0], regiao_d["y2"] + (altura_linha * 2))
+        pixels_abaixo_d = int(cv2.countNonZero(folha_threshold[y1:y2, coluna_x1:coluna_x2]))
+
+        if pixels_abaixo_d > max(item.get("minimo_marcacao", 0) * 2, item.get("maior_pixels", 0) * 1.2):
+            item["marcacao_fora_alternativa"] = pixels_abaixo_d
+            if item.get("resposta") in {"A", "B"}:
+                item["resposta"] = None
+                respostas[questao] = None
 
     return respostas, debug
 
