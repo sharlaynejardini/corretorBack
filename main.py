@@ -297,10 +297,14 @@ def _buscar_contexto_aluno(db: Session, aluno_id: str, modelo):
     turma = db.query(models.Turma).filter(models.Turma.id == aluno.turma_id).first()
     serie = _extrair_serie_turma(turma.nome if turma else "")
 
+    escola = db.query(models.Escola).filter(models.Escola.id == modelo.escola_id).first()
+
+    if not serie and "DANIELA" in _normalizar_texto(escola.nome if escola else ""):
+        serie = 8
+
     if not serie:
         raise HTTPException(status_code=400, detail="Nao consegui identificar a serie do aluno")
 
-    escola = db.query(models.Escola).filter(models.Escola.id == modelo.escola_id).first()
     codigo_gabarito = _codigo_gabarito_turma(
         escola.nome if escola else "",
         turma.nome if turma else "",
@@ -316,6 +320,11 @@ def _buscar_contexto_correcao(db: Session, aluno_id: str, modelo, codigo_gabarit
     serie, codigo_padrao = _buscar_contexto_aluno(db, aluno_id, modelo)
     codigo_final = _normalizar_codigo_gabarito(codigo_gabarito) if codigo_gabarito else codigo_padrao
     return serie, codigo_final
+
+
+def _modelo_eh_daniela(db: Session, modelo):
+    escola = db.query(models.Escola).filter(models.Escola.id == modelo.escola_id).first()
+    return "DANIELA" in _normalizar_texto(escola.nome if escola else "")
 
 
 def _buscar_gabarito(db: Session, modelo_id, serie: int, codigo_gabarito: str = GABARITO_PADRAO):
@@ -1037,11 +1046,15 @@ def corrigir_manual(
     if any(resposta is None for resposta in respostas_lista):
         raise HTTPException(status_code=400, detail="Use somente alternativas A, B, C ou D")
 
-    if len(respostas_lista) != len(gabaritos):
+    if len(respostas_lista) < len(gabaritos) or (
+        len(respostas_lista) > len(gabaritos) and not _modelo_eh_daniela(db, modelo)
+    ):
         raise HTTPException(
             status_code=400,
             detail=f"Quantidade de respostas invalida. Esperado: {len(gabaritos)}. Recebido: {len(respostas_lista)}.",
         )
+
+    respostas_lista = respostas_lista[: len(gabaritos)]
 
     respostas_detectadas = {
         indice + 1: resposta for indice, resposta in enumerate(respostas_lista)

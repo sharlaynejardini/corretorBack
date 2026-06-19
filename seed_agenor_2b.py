@@ -19,6 +19,45 @@ MODELOS = {
     ],
 }
 
+GABARITOS = {
+    (1, 5, "CADERNO_A"): [
+        "D",
+        "C",
+        "B",
+        "C",
+        "A",
+        "B",
+        "C",
+        "A",
+        "D",
+        "A",
+        "C",
+        "A",
+        "B",
+        "C",
+        "D",
+        "B",
+        "D",
+        "B",
+        "A",
+        "C",
+        "A",
+        "A",
+        "A",
+        "C",
+        "B",
+    ],
+}
+
+
+def _disciplinas_por_questao(disciplinas):
+    disciplinas_questoes = []
+
+    for disciplina, _sigla, quantidade in disciplinas:
+        disciplinas_questoes.extend([disciplina] * quantidade)
+
+    return disciplinas_questoes
+
 
 def main():
     if SessionLocal is None:
@@ -73,6 +112,50 @@ def main():
                         ordem=ordem,
                     )
                 )
+
+            disciplinas_questoes = _disciplinas_por_questao(disciplinas)
+            for (dia_gabarito, serie, codigo_gabarito), respostas in GABARITOS.items():
+                if dia_gabarito != dia:
+                    continue
+
+                if len(respostas) != len(disciplinas_questoes):
+                    raise RuntimeError(
+                        f"Gabarito {codigo_gabarito} do {serie} ano tem "
+                        f"{len(respostas)} respostas, mas o modelo tem "
+                        f"{len(disciplinas_questoes)} questoes."
+                    )
+
+                gabaritos_existentes = {
+                    gabarito.numero_questao: gabarito
+                    for gabarito in (
+                        db.query(models.Gabarito)
+                        .filter(models.Gabarito.modelo_prova_id == modelo.id)
+                        .filter(models.Gabarito.serie == serie)
+                        .filter(models.Gabarito.codigo_gabarito == codigo_gabarito)
+                        .all()
+                    )
+                }
+
+                for numero_questao, resposta in enumerate(respostas, start=1):
+                    disciplina = disciplinas_questoes[numero_questao - 1]
+                    gabarito = gabaritos_existentes.get(numero_questao)
+
+                    if gabarito:
+                        gabarito.disciplina = disciplina
+                        gabarito.resposta_correta = resposta
+                    else:
+                        db.add(
+                            models.Gabarito(
+                                modelo_prova_id=modelo.id,
+                                serie=serie,
+                                codigo_gabarito=codigo_gabarito,
+                                numero_questao=numero_questao,
+                                disciplina=disciplina,
+                                resposta_correta=resposta,
+                            )
+                        )
+
+                print(f"Gabarito {serie} ano {codigo_gabarito}: {len(respostas)} respostas")
 
             print(f"{nome_modelo}: {sum(item[2] for item in disciplinas)} questoes")
 
