@@ -278,12 +278,18 @@ def _preparar_leitura_agenor(folha):
 
 def _preparar_leitura_daniela(folha):
     folha = _normalizar_orientacao_paisagem(folha)
+    amarelo = _mascara_cor_hsv(folha, (15, 40, 70), (45, 255, 255))
+    posicoes_y = np.where(amarelo > 0)[0]
+
+    if len(posicoes_y) and np.median(posicoes_y) > folha.shape[0] / 2:
+        folha = cv2.rotate(folha, cv2.ROTATE_180)
+
     folha_cinza = cv2.cvtColor(folha, cv2.COLOR_BGR2GRAY)
-    hsv = cv2.cvtColor(folha, cv2.COLOR_BGR2HSV)
-    folha_threshold = cv2.inRange(
-        hsv,
-        np.array((85, 25, 20), dtype=np.uint8),
-        np.array((160, 255, 230), dtype=np.uint8),
+    folha_threshold = cv2.inRange(folha_cinza, 0, 90)
+    folha_threshold = cv2.morphologyEx(
+        folha_threshold,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
     )
     folha_threshold = cv2.morphologyEx(
         folha_threshold,
