@@ -276,6 +276,24 @@ def _preparar_leitura_agenor(folha):
     return cinza_contraste, folha_threshold
 
 
+def _preparar_leitura_daniela(folha):
+    folha = _normalizar_orientacao_paisagem(folha)
+    folha_cinza = cv2.cvtColor(folha, cv2.COLOR_BGR2GRAY)
+    hsv = cv2.cvtColor(folha, cv2.COLOR_BGR2HSV)
+    folha_threshold = cv2.inRange(
+        hsv,
+        np.array((85, 25, 20), dtype=np.uint8),
+        np.array((160, 255, 230), dtype=np.uint8),
+    )
+    folha_threshold = cv2.morphologyEx(
+        folha_threshold,
+        cv2.MORPH_CLOSE,
+        cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)),
+    )
+
+    return folha, folha_cinza, folha_threshold
+
+
 def _mascara_cor_hsv(imagem, minimo, maximo):
     hsv = cv2.cvtColor(imagem, cv2.COLOR_BGR2HSV)
     mascara = cv2.inRange(hsv, np.array(minimo), np.array(maximo))
@@ -592,7 +610,9 @@ def processar_folha(caminho_arquivo, total_questoes=None):
                     "Aproxime a foto do gabarito do Agenor para a leitura automatica.",
                 )
 
-        if total_questoes == 25:
+        if total_questoes == 14:
+            folha, folha_cinza, folha_threshold = _preparar_leitura_daniela(folha)
+        elif total_questoes == 25:
             folha_cinza, folha_threshold = _preparar_leitura_agenor(folha)
         else:
             folha_cinza, folha_threshold = _limiarizar_folha(folha)
@@ -1343,6 +1363,32 @@ def _qualidade_leitura_agenor(debug):
     return baixas_confiancas <= 4 and media_diferenca >= 140
 
 
+def _ler_grade_daniela_14(folha_threshold):
+    leitura = _ler_grade_agenor_recorte(folha_threshold)
+    if leitura is None:
+        raise ValueError(
+            "Nao consegui localizar a grade do simulado da Daniela. "
+            "Refaca a foto mais perto do gabarito."
+        )
+
+    respostas, debug = leitura
+    respostas = {
+        questao: resposta
+        for questao, resposta in respostas.items()
+        if questao <= 14
+    }
+    debug = [
+        item
+        for item in debug
+        if item.get("questao") <= 14
+    ]
+
+    for item in debug:
+        item["tentativa_grade"]["metodo"] = "daniela_14"
+
+    return respostas, debug
+
+
 def _pontuar_debug(debug):
     confiancas = [item["confianca"] for item in debug]
     diferencas = [item["diferenca_pixels"] for item in debug]
@@ -1411,6 +1457,9 @@ def _melhor_recorte_takaoka(recortes, total_questoes):
 
 def _ler_grade_com_tentativas(folha_threshold, total_questoes):
     altura, largura = folha_threshold.shape
+
+    if total_questoes == 14:
+        return _ler_grade_daniela_14(folha_threshold)
 
     if total_questoes not in {25, 30}:
         grade = _grade_questoes(largura, altura, total_questoes)
