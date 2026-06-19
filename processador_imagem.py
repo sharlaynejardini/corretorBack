@@ -580,7 +580,7 @@ def processar_folha(caminho_arquivo, total_questoes=None):
 
             candidatos.extend(_candidatos_folha_por_contorno(imagem_candidata, bordas_candidatas))
 
-        if not candidatos and total_questoes == 25:
+        if not candidatos and total_questoes in {14, 25}:
             for _, imagem_candidata, bordas_candidatas in _preparar_candidatos_imagem(
                 original,
                 incluir_inclinacoes=True,
@@ -598,7 +598,7 @@ def processar_folha(caminho_arquivo, total_questoes=None):
             return None, "Nao consegui encontrar o contorno da folha"
 
         folha = max(candidatos, key=_pontuar_folha_generica)
-        if total_questoes == 25:
+        if total_questoes in {14, 25}:
             altura_folha, largura_folha = folha.shape[:2]
             proporcao_recorte = max(altura_folha, largura_folha) / float(
                 max(min(altura_folha, largura_folha), 1)
@@ -607,7 +607,7 @@ def processar_folha(caminho_arquivo, total_questoes=None):
             if proporcao_recorte < 1.50:
                 return (
                     None,
-                    "Aproxime a foto do gabarito do Agenor para a leitura automatica.",
+                    "Aproxime a foto do gabarito para a leitura automatica.",
                 )
 
         if total_questoes == 14:
