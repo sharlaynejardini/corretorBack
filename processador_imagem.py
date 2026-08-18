@@ -546,9 +546,9 @@ def processar_folha(caminho_arquivo, total_questoes=None):
                     recorte
                     for recorte in recortes_candidatos
                     if recorte is not None
-                    and recorte.shape[0] >= 240
-                    and recorte.shape[1] >= 500
-                    and 1.65 <= recorte.shape[1] / float(max(recorte.shape[0], 1)) <= 2.40
+                    and recorte.shape[0] >= 200
+                    and recorte.shape[1] >= 380
+                    and 1.50 <= recorte.shape[1] / float(max(recorte.shape[0], 1)) <= 2.40
                 ]
 
             melhor = _melhor_recorte_takaoka(
