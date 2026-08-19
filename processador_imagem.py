@@ -1192,6 +1192,101 @@ def _ler_grade_por_blocos(folha_threshold, blocos_info):
     return respostas, debug
 
 
+def _ler_grade_takaoka_15x2(folha_threshold):
+    altura, largura = folha_threshold.shape
+    proporcao = largura / float(max(altura, 1))
+
+    if not 1.45 <= proporcao <= 2.25:
+        return None
+
+    tabelas = [
+        (1, 0.060, 0.943, [0.264, 0.326, 0.387, 0.448, 0.508], "superior"),
+        (16, 0.060, 0.943, [0.693, 0.754, 0.815, 0.875, 0.936], "inferior"),
+    ]
+    respostas = {}
+    debug = []
+
+    for questao_inicial, inicio_x, fim_x, limites_y, bloco in tabelas:
+        x_tabela_1 = int(largura * inicio_x)
+        x_tabela_2 = int(largura * fim_x)
+        largura_celula = (x_tabela_2 - x_tabela_1) / 15
+        margem_x = max(int(largura_celula * 0.12), 3)
+        margem_y = max(int(altura * 0.006), 2)
+
+        for deslocamento in range(15):
+            questao = questao_inicial + deslocamento
+            x1 = max(int(x_tabela_1 + deslocamento * largura_celula + margem_x), 0)
+            x2 = min(int(x_tabela_1 + (deslocamento + 1) * largura_celula - margem_x), largura)
+            contagens = {}
+            regioes = {}
+
+            for indice_alternativa, alternativa in enumerate(("A", "B", "C", "D")):
+                y1 = max(int(altura * limites_y[indice_alternativa] + margem_y), 0)
+                y2 = min(int(altura * limites_y[indice_alternativa + 1] - margem_y), altura)
+
+                if x2 <= x1 or y2 <= y1:
+                    pixels = 0
+                else:
+                    pixels = int(cv2.countNonZero(folha_threshold[y1:y2, x1:x2]))
+
+                contagens[alternativa] = pixels
+                regioes[alternativa] = {
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                }
+
+            melhor_alternativa = max(contagens, key=contagens.get)
+            ordenadas = sorted(contagens.values(), reverse=True)
+            maior_pixels = ordenadas[0] if ordenadas else 0
+            segundo_maior = ordenadas[1] if len(ordenadas) > 1 else 0
+            diferenca = maior_pixels - segundo_maior
+            confianca = round(maior_pixels / max(segundo_maior, 1), 2)
+            altura_regiao = max(
+                int(altura * (limites_y[1] - limites_y[0]) - (2 * margem_y)),
+                1,
+            )
+            area_regiao = max((x2 - x1) * altura_regiao, 1)
+            minimo_marcacao = max(int(area_regiao * 0.08), 35)
+            resposta_final = melhor_alternativa
+
+            if maior_pixels < minimo_marcacao:
+                resposta_final = None
+            elif segundo_maior > 0 and confianca < 1.25 and diferenca < int(minimo_marcacao * 1.6):
+                resposta_final = None
+
+            respostas[questao] = resposta_final
+            debug.append(
+                {
+                    "questao": questao,
+                    "resposta": resposta_final,
+                    "bloco": bloco,
+                    "contagens": contagens,
+                    "maior_pixels": maior_pixels,
+                    "segundo_maior_pixels": segundo_maior,
+                    "diferenca_pixels": diferenca,
+                    "confianca": confianca,
+                    "minimo_marcacao": minimo_marcacao,
+                    "centro_x": int((x1 + x2) / 2),
+                    "centros_y": {
+                        alternativa: int(
+                            (
+                                regioes[alternativa]["y1"]
+                                + regioes[alternativa]["y2"]
+                            )
+                            / 2
+                        )
+                        for alternativa in regioes
+                    },
+                    "regioes": regioes,
+                    "tentativa_grade": {"metodo": "takaoka_15x2"},
+                }
+            )
+
+    return respostas, debug
+
+
 def _ler_grade_agenor_recorte(folha_threshold):
     imagem = folha_threshold
 
@@ -1568,6 +1663,18 @@ def _ler_grade_com_tentativas(folha_threshold, total_questoes):
             return respostas, debug
 
     if total_questoes == 30:
+        leitura_takaoka_15x2 = _ler_grade_takaoka_15x2(folha_threshold)
+        if leitura_takaoka_15x2 is not None:
+            respostas_takaoka, debug_takaoka = leitura_takaoka_15x2
+            respondidas_takaoka = sum(
+                1
+                for resposta in respostas_takaoka.values()
+                if resposta in {"A", "B", "C", "D"}
+            )
+
+            if respondidas_takaoka >= max(total_questoes - 2, 1):
+                return leitura_takaoka_15x2
+
         blocos_info = _detectar_blocos_grade(folha_threshold)
         if blocos_info is not None:
             leitura_blocos = _ler_grade_por_blocos(folha_threshold, blocos_info)
