@@ -33,7 +33,14 @@ ORDEM_DISCIPLINAS_RESULTADO = [
     "INGLES",
 ]
 TRANSFERIDOS_RELATORIO_POR_TURMA = {
-    "8A": {13, 17, 19},
+    "8A": {
+        13: "Transferido",
+        17: "Transferido",
+        19: "Transferido",
+    },
+    "8C": {
+        26: "Transferida/Remanejamento 8B",
+    },
 }
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -211,9 +218,9 @@ def _normalizar_texto(valor: str):
     return texto.upper()
 
 
-def _aluno_transferido_relatorio(nome_turma: str, numero_chamada: int | None):
+def _status_transferencia_relatorio(nome_turma: str, numero_chamada: int | None):
     turma = _normalizar_texto(nome_turma).replace(" ", "")
-    return numero_chamada in TRANSFERIDOS_RELATORIO_POR_TURMA.get(turma, set())
+    return TRANSFERIDOS_RELATORIO_POR_TURMA.get(turma, {}).get(numero_chamada)
 
 
 def _normalizar_disciplina_ordem(valor: str):
@@ -870,10 +877,11 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
                 _calcular_nota(resumo["acertos"], resumo["total"]) if resumo else 0
             )
         nota_global = _calcular_media_notas_disciplinas(notas_disciplinas)
-        transferido = _aluno_transferido_relatorio(
+        status_transferencia = _status_transferencia_relatorio(
             turma.nome if turma else "",
             aluno.numero_chamada,
         )
+        transferido = bool(status_transferencia)
 
         linhas.append(
             {
@@ -883,7 +891,7 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
                 "disciplinas": notas_disciplinas,
                 "nota_global": nota_global,
                 "transferido": transferido,
-                "status": "Transferido"
+                "status": status_transferencia
                 if transferido
                 else _montar_status_resultado_final(
                     escola_nome,
@@ -953,7 +961,8 @@ def _montar_relatorio_ausentes_turma(db: Session, turma_id: str, escola_id: str,
         if not dias_ausentes:
             continue
 
-        transferido = _aluno_transferido_relatorio(turma.nome, aluno.numero_chamada)
+        status_transferencia = _status_transferencia_relatorio(turma.nome, aluno.numero_chamada)
+        transferido = bool(status_transferencia)
 
         linhas.append(
             {
@@ -965,7 +974,7 @@ def _montar_relatorio_ausentes_turma(db: Session, turma_id: str, escola_id: str,
                 "ausente_dia_2": 2 in dias_ausentes if 2 in dias_modelo else None,
                 "dias_ausentes": dias_ausentes,
                 "dias_realizados": sorted(dias_realizados),
-                "status": "Transferido"
+                "status": status_transferencia
                 if transferido
                 else "Faltou " + " e ".join(f"Dia {dia}" for dia in dias_ausentes),
             }
