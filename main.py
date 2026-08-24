@@ -38,8 +38,8 @@ TRANSFERIDOS_RELATORIO_POR_TURMA = {
         17: "Transferido",
         19: "Transferido",
     },
-    "8C": {
-        26: "Transferida/Remanejada 8B",
+    "8B": {
+        10: "Transferida/Remanejada 8B",
     },
 }
 
