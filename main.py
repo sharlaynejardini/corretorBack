@@ -726,10 +726,18 @@ def _montar_excel_resultado_final(escola_nome: str, bimestre: int, disciplinas, 
     titulo.alignment = Alignment(horizontal="center")
 
     preenchimento_cabecalho = PatternFill("solid", fgColor="D9EAF7")
+    preenchimento_transferido = PatternFill("solid", fgColor="DCFCE7")
     for celula in planilha[2]:
         celula.font = Font(bold=True)
         celula.fill = preenchimento_cabecalho
         celula.alignment = Alignment(horizontal="center")
+
+    for indice, linha in enumerate(linhas, start=3):
+        if not linha.get("transferido"):
+            continue
+
+        for celula in planilha[indice]:
+            celula.fill = preenchimento_transferido
 
     for coluna in planilha.columns:
         largura = max(len(str(celula.value or "")) for celula in coluna) + 2
@@ -862,6 +870,10 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
                 _calcular_nota(resumo["acertos"], resumo["total"]) if resumo else 0
             )
         nota_global = _calcular_media_notas_disciplinas(notas_disciplinas)
+        transferido = _aluno_transferido_relatorio(
+            turma.nome if turma else "",
+            aluno.numero_chamada,
+        )
 
         linhas.append(
             {
@@ -870,7 +882,10 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
                 "aluno": aluno.nome,
                 "disciplinas": notas_disciplinas,
                 "nota_global": nota_global,
-                "status": _montar_status_resultado_final(
+                "transferido": transferido,
+                "status": "Transferido"
+                if transferido
+                else _montar_status_resultado_final(
                     escola_nome,
                     dias_modelo,
                     dias_corrigidos_por_aluno.get(aluno_id, set()),
