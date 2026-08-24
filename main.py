@@ -873,6 +873,144 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
     return disciplinas, linhas
 
 
+def _montar_relatorio_ausentes_turma(db: Session, turma_id: str, escola_id: str, bimestre: int):
+    turma = (
+        db.query(models.Turma)
+        .filter(models.Turma.id == turma_id)
+        .filter(models.Turma.escola_id == escola_id)
+        .first()
+    )
+    if not turma:
+        raise HTTPException(status_code=404, detail="Turma nao encontrada")
+
+    escola = db.query(models.Escola).filter(models.Escola.id == escola_id).first()
+    if not escola:
+        raise HTTPException(status_code=404, detail="Escola nao encontrada")
+
+    modelos = (
+        db.query(models.ModeloProva)
+        .filter(models.ModeloProva.escola_id == escola_id)
+        .filter(models.ModeloProva.bimestre == bimestre)
+        .order_by(models.ModeloProva.dia)
+        .all()
+    )
+    if not modelos:
+        raise HTTPException(status_code=404, detail="Modelo de prova nao encontrado")
+
+    modelo_ids = [modelo.id for modelo in modelos]
+    dias_modelo = sorted({modelo.dia for modelo in modelos})
+
+    alunos = (
+        db.query(models.Aluno)
+        .filter(models.Aluno.turma_id == turma_id)
+        .order_by(models.Aluno.numero_chamada, models.Aluno.nome)
+        .all()
+    )
+    aluno_ids = [aluno.id for aluno in alunos]
+
+    resultados = (
+        db.query(models.ResultadoAluno)
+        .filter(models.ResultadoAluno.modelo_prova_id.in_(modelo_ids))
+        .filter(models.ResultadoAluno.aluno_id.in_(aluno_ids))
+        .all()
+        if aluno_ids
+        else []
+    )
+
+    dias_realizados_por_aluno = {}
+    for resultado in resultados:
+        dias_realizados_por_aluno.setdefault(str(resultado.aluno_id), set()).add(resultado.dia)
+
+    linhas = []
+    for aluno in alunos:
+        aluno_id = str(aluno.id)
+        dias_realizados = dias_realizados_por_aluno.get(aluno_id, set())
+        dias_ausentes = [dia for dia in dias_modelo if dia not in dias_realizados]
+
+        if not dias_ausentes:
+            continue
+
+        linhas.append(
+            {
+                "aluno_id": aluno_id,
+                "numero_chamada": aluno.numero_chamada,
+                "aluno": aluno.nome,
+                "ausente_dia_1": 1 in dias_ausentes if 1 in dias_modelo else None,
+                "ausente_dia_2": 2 in dias_ausentes if 2 in dias_modelo else None,
+                "dias_ausentes": dias_ausentes,
+                "dias_realizados": sorted(dias_realizados),
+                "status": "Faltou " + " e ".join(f"Dia {dia}" for dia in dias_ausentes),
+            }
+        )
+
+    return {
+        "escola": escola.nome,
+        "turma": turma.nome,
+        "turma_id": turma_id,
+        "escola_id": escola_id,
+        "bimestre": bimestre,
+        "dias_modelo": dias_modelo,
+        "total_alunos": len(alunos),
+        "total_ausentes": len(linhas),
+        "total_presentes": len(alunos) - len(linhas),
+        "alunos": linhas,
+    }
+
+
+def _montar_excel_relatorio_ausentes(dados):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    workbook = Workbook()
+    planilha = workbook.active
+    planilha.title = "Ausentes por turma"
+
+    cabecalho = ["NÂº", "Aluno", "Dia 1", "Dia 2", "Status"]
+    planilha.append(
+        [
+            f"Alunos sem avaliacao - {dados['escola']} - {dados['turma']} - "
+            f"{dados['bimestre']}Âº bimestre"
+        ]
+    )
+    planilha.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(cabecalho))
+    planilha.append(cabecalho)
+
+    for aluno in dados["alunos"]:
+        planilha.append(
+            [
+                aluno["numero_chamada"],
+                aluno["aluno"],
+                "Nao realizou" if aluno["ausente_dia_1"] else "-" if aluno["ausente_dia_1"] is None else "Realizou",
+                "Nao realizou" if aluno["ausente_dia_2"] else "-" if aluno["ausente_dia_2"] is None else "Realizou",
+                aluno["status"],
+            ]
+        )
+
+    titulo = planilha[1][0]
+    titulo.font = Font(bold=True, size=14)
+    titulo.alignment = Alignment(horizontal="center")
+
+    preenchimento_cabecalho = PatternFill("solid", fgColor="FEE2E2")
+    for celula in planilha[2]:
+        celula.font = Font(bold=True)
+        celula.fill = preenchimento_cabecalho
+        celula.alignment = Alignment(horizontal="center")
+
+    for coluna in planilha.columns:
+        largura = max(len(str(celula.value or "")) for celula in coluna) + 2
+        planilha.column_dimensions[get_column_letter(coluna[0].column)].width = min(max(largura, 12), 42)
+
+    for linha in planilha.iter_rows(min_row=3):
+        for celula in linha:
+            celula.alignment = Alignment(vertical="center")
+
+    arquivo = BytesIO()
+    workbook.save(arquivo)
+    arquivo.seek(0)
+    return arquivo
+
+
 @app.get("/")
 def home():
     return {"mensagem": "Backend do Sistema de Gabarito funcionando"}
@@ -1564,6 +1702,34 @@ def listar_resultados_alunos(
         for aluno in alunos
         if str(aluno.id) in linhas_por_aluno
     ]
+
+
+@app.get("/relatorio-ausentes-turma")
+def relatorio_ausentes_turma(
+    turma_id: str,
+    escola_id: str,
+    bimestre: int,
+    db: Session = Depends(get_db),
+):
+    return _montar_relatorio_ausentes_turma(db, turma_id, escola_id, bimestre)
+
+
+@app.get("/relatorio-ausentes-turma-xlsx")
+def baixar_relatorio_ausentes_turma_xlsx(
+    turma_id: str,
+    escola_id: str,
+    bimestre: int,
+    db: Session = Depends(get_db),
+):
+    dados = _montar_relatorio_ausentes_turma(db, turma_id, escola_id, bimestre)
+    arquivo = _montar_excel_relatorio_ausentes(dados)
+    nome_arquivo = f"ausentes_{dados['turma'].replace(' ', '_')}_{bimestre}_bimestre.xlsx"
+
+    return StreamingResponse(
+        arquivo,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'},
+    )
 
 
 @app.get("/resultado-final-excel")
