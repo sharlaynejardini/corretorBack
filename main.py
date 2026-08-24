@@ -41,6 +41,10 @@ TRANSFERIDOS_RELATORIO_POR_TURMA = {
     "8B": {
         10: "Transferida/Remanejada 8B",
     },
+    "8C": {
+        4: "Transferidos/Remanejado",
+        18: "Transferidos/Remanejado",
+    },
 }
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
