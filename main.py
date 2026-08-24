@@ -32,6 +32,9 @@ ORDEM_DISCIPLINAS_RESULTADO = [
     "ARTES",
     "INGLES",
 ]
+TRANSFERIDOS_RELATORIO_POR_TURMA = {
+    "8A": {13, 17, 19},
+}
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -206,6 +209,11 @@ def _normalizar_texto(valor: str):
     texto = unicodedata.normalize("NFKD", valor or "")
     texto = "".join(caractere for caractere in texto if not unicodedata.combining(caractere))
     return texto.upper()
+
+
+def _aluno_transferido_relatorio(nome_turma: str, numero_chamada: int | None):
+    turma = _normalizar_texto(nome_turma).replace(" ", "")
+    return numero_chamada in TRANSFERIDOS_RELATORIO_POR_TURMA.get(turma, set())
 
 
 def _normalizar_disciplina_ordem(valor: str):
@@ -930,16 +938,21 @@ def _montar_relatorio_ausentes_turma(db: Session, turma_id: str, escola_id: str,
         if not dias_ausentes:
             continue
 
+        transferido = _aluno_transferido_relatorio(turma.nome, aluno.numero_chamada)
+
         linhas.append(
             {
                 "aluno_id": aluno_id,
                 "numero_chamada": aluno.numero_chamada,
                 "aluno": aluno.nome,
+                "transferido": transferido,
                 "ausente_dia_1": 1 in dias_ausentes if 1 in dias_modelo else None,
                 "ausente_dia_2": 2 in dias_ausentes if 2 in dias_modelo else None,
                 "dias_ausentes": dias_ausentes,
                 "dias_realizados": sorted(dias_realizados),
-                "status": "Faltou " + " e ".join(f"Dia {dia}" for dia in dias_ausentes),
+                "status": "Transferido"
+                if transferido
+                else "Faltou " + " e ".join(f"Dia {dia}" for dia in dias_ausentes),
             }
         )
 
@@ -953,6 +966,7 @@ def _montar_relatorio_ausentes_turma(db: Session, turma_id: str, escola_id: str,
         "total_alunos": len(alunos),
         "total_ausentes": len(linhas),
         "total_presentes": len(alunos) - len(linhas),
+        "total_transferidos": sum(1 for linha in linhas if linha["transferido"]),
         "alunos": linhas,
     }
 
@@ -992,10 +1006,18 @@ def _montar_excel_relatorio_ausentes(dados):
     titulo.alignment = Alignment(horizontal="center")
 
     preenchimento_cabecalho = PatternFill("solid", fgColor="FEE2E2")
+    preenchimento_transferido = PatternFill("solid", fgColor="DCFCE7")
     for celula in planilha[2]:
         celula.font = Font(bold=True)
         celula.fill = preenchimento_cabecalho
         celula.alignment = Alignment(horizontal="center")
+
+    for indice, aluno in enumerate(dados["alunos"], start=3):
+        if not aluno.get("transferido"):
+            continue
+
+        for celula in planilha[indice]:
+            celula.fill = preenchimento_transferido
 
     for coluna in planilha.columns:
         largura = max(len(str(celula.value or "")) for celula in coluna) + 2
