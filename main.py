@@ -1113,6 +1113,100 @@ def _montar_excel_relatorio_ausentes(dados):
     return arquivo
 
 
+def _nome_aba_excel(nome: str, usados: set[str]):
+    caracteres_invalidos = "[]:*?/\\"
+    nome_limpo = "".join("_" if caractere in caracteres_invalidos else caractere for caractere in nome)
+    nome_base = (nome_limpo or "Turma").strip()[:31]
+    nome_aba = nome_base
+    indice = 2
+
+    while nome_aba in usados:
+        sufixo = f" {indice}"
+        nome_aba = f"{nome_base[:31 - len(sufixo)]}{sufixo}"
+        indice += 1
+
+    usados.add(nome_aba)
+    return nome_aba
+
+
+def _montar_excel_relatorios_ausentes_escola(db: Session, escola_id: str, bimestre: int):
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    escola = db.query(models.Escola).filter(models.Escola.id == escola_id).first()
+    if not escola:
+        raise HTTPException(status_code=404, detail="Escola nao encontrada")
+
+    turmas = (
+        db.query(models.Turma)
+        .filter(models.Turma.escola_id == escola_id)
+        .order_by(models.Turma.nome)
+        .all()
+    )
+    if not turmas:
+        raise HTTPException(status_code=404, detail="Turma nao encontrada")
+
+    workbook = Workbook()
+    abas_usadas = set()
+    cabecalho = ["NÃ‚Âº", "Aluno", "Dia 1", "Dia 2", "Status"]
+    preenchimento_cabecalho = PatternFill("solid", fgColor="FEE2E2")
+
+    for indice, turma in enumerate(turmas):
+        planilha = workbook.active if indice == 0 else workbook.create_sheet()
+        planilha.title = _nome_aba_excel(turma.nome, abas_usadas)
+        dados = _montar_relatorio_ausentes_turma(db, str(turma.id), escola_id, bimestre)
+
+        planilha.append(
+            [
+                f"Alunos sem avaliacao - {dados['escola']} - {dados['turma']} - "
+                f"{dados['bimestre']}Ã‚Âº bimestre"
+            ]
+        )
+        planilha.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(cabecalho))
+        planilha.append(cabecalho)
+
+        for aluno in dados["alunos"]:
+            planilha.append(
+                [
+                    aluno["numero_chamada"],
+                    aluno["aluno"],
+                    "Nao realizou"
+                    if aluno["ausente_dia_1"]
+                    else "-" if aluno["ausente_dia_1"] is None else "Realizou",
+                    "Nao realizou"
+                    if aluno["ausente_dia_2"]
+                    else "-" if aluno["ausente_dia_2"] is None else "Realizou",
+                    aluno["status"],
+                ]
+            )
+
+        titulo = planilha[1][0]
+        titulo.font = Font(bold=True, size=14)
+        titulo.alignment = Alignment(horizontal="center")
+
+        for celula in planilha[2]:
+            celula.font = Font(bold=True)
+            celula.fill = preenchimento_cabecalho
+            celula.alignment = Alignment(horizontal="center")
+
+        for coluna in planilha.columns:
+            largura = max(len(str(celula.value or "")) for celula in coluna) + 2
+            planilha.column_dimensions[get_column_letter(coluna[0].column)].width = min(
+                max(largura, 12),
+                42,
+            )
+
+        for linha in planilha.iter_rows(min_row=3):
+            for celula in linha:
+                celula.alignment = Alignment(vertical="center")
+
+    arquivo = BytesIO()
+    workbook.save(arquivo)
+    arquivo.seek(0)
+    return arquivo
+
+
 @app.get("/")
 def home():
     return {"mensagem": "Backend do Sistema de Gabarito funcionando"}
@@ -1885,6 +1979,22 @@ def baixar_relatorio_ausentes_turma_xlsx(
     dados = _montar_relatorio_ausentes_turma(db, turma_id, escola_id, bimestre)
     arquivo = _montar_excel_relatorio_ausentes(dados)
     nome_arquivo = f"ausentes_{dados['turma'].replace(' ', '_')}_{bimestre}_bimestre.xlsx"
+
+    return StreamingResponse(
+        arquivo,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'},
+    )
+
+
+@app.get("/relatorio-ausentes-escola-xlsx")
+def baixar_relatorio_ausentes_escola_xlsx(
+    escola_id: str,
+    bimestre: int,
+    db: Session = Depends(get_db),
+):
+    arquivo = _montar_excel_relatorios_ausentes_escola(db, escola_id, bimestre)
+    nome_arquivo = f"ausentes_todas_turmas_{bimestre}_bimestre.xlsx"
 
     return StreamingResponse(
         arquivo,
