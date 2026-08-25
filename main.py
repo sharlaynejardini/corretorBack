@@ -52,6 +52,19 @@ TRANSFERIDOS_RELATORIO_POR_TURMA = {
             "LIVIA KEIKO RIBEIRO HIRAO": "Transferidos/Remanejados",
         },
     },
+    "7B": {
+        3: "Transferidos/Remanejados",
+        11: "Transferidos/Remanejados",
+        22: "Transferidos/Remanejados",
+        "nomes": {
+            "ARTHUR JESUS": "Transferidos/Remanejados",
+            "ARTHUR JESUS DA SILVA": "Transferidos/Remanejados",
+            "GIULIA PAPIN": "Transferidos/Remanejados",
+            "GIULIA PAPIN SILVA": "Transferidos/Remanejados",
+            "MILLENA CAMPOS": "Transferidos/Remanejados",
+            "MILLENA CAMPOS DE AZEVEDO SILVA": "Transferidos/Remanejados",
+        },
+    },
     "8A": {
         13: "Transferido",
         17: "Transferido",
