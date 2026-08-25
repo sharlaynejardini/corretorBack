@@ -48,6 +48,13 @@ TRANSFERIDOS_RELATORIO_POR_TURMA = {
     "9A": {
         13: "Remanejados/Transferidos",
     },
+    "9C": {
+        5: "Transferidos/Remanejados",
+        "nomes": {
+            "REBECA SANTOS": "Transferidos/Remanejados",
+            "REBECA SANTOS BASILIO": "Transferidos/Remanejados",
+        },
+    },
 }
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -225,9 +232,20 @@ def _normalizar_texto(valor: str):
     return texto.upper()
 
 
-def _status_transferencia_relatorio(nome_turma: str, numero_chamada: int | None):
+def _status_transferencia_relatorio(
+    nome_turma: str,
+    numero_chamada: int | None,
+    nome_aluno: str = "",
+):
     turma = _normalizar_texto(nome_turma).replace(" ", "")
-    return TRANSFERIDOS_RELATORIO_POR_TURMA.get(turma, {}).get(numero_chamada)
+    transferidos_turma = TRANSFERIDOS_RELATORIO_POR_TURMA.get(turma, {})
+    status_por_numero = transferidos_turma.get(numero_chamada)
+    if status_por_numero:
+        return status_por_numero
+
+    nomes_transferidos = transferidos_turma.get("nomes", {})
+    aluno_normalizado = _normalizar_texto(nome_aluno)
+    return nomes_transferidos.get(aluno_normalizado)
 
 
 def _normalizar_disciplina_ordem(valor: str):
@@ -887,6 +905,7 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
         status_transferencia = _status_transferencia_relatorio(
             turma.nome if turma else "",
             aluno.numero_chamada,
+            aluno.nome,
         )
         transferido = bool(status_transferencia)
 
@@ -968,7 +987,11 @@ def _montar_relatorio_ausentes_turma(db: Session, turma_id: str, escola_id: str,
         if not dias_ausentes:
             continue
 
-        status_transferencia = _status_transferencia_relatorio(turma.nome, aluno.numero_chamada)
+        status_transferencia = _status_transferencia_relatorio(
+            turma.nome,
+            aluno.numero_chamada,
+            aluno.nome,
+        )
         transferido = bool(status_transferencia)
 
         linhas.append(
