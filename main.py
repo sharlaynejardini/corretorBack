@@ -33,6 +33,12 @@ ORDEM_DISCIPLINAS_RESULTADO = [
     "INGLES",
 ]
 TRANSFERIDOS_RELATORIO_POR_TURMA = {
+    "6B": {
+        "nomes": {
+            "LIVIA KEIKO": "Transferidos/Remanejados",
+            "LIVIA KEIKO RIBEIRO HIRAO": "Transferidos/Remanejados",
+        },
+    },
     "8A": {
         13: "Transferido",
         17: "Transferido",
