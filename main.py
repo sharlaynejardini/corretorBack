@@ -33,6 +33,19 @@ ORDEM_DISCIPLINAS_RESULTADO = [
     "INGLES",
 ]
 TRANSFERIDOS_RELATORIO_POR_TURMA = {
+    "6A": {
+        1: "Transferidos/Remanejados",
+        5: "Transferidos/Remanejados",
+        14: "Transferidos/Remanejados",
+        "nomes": {
+            "ALICE MARTINS": "Transferidos/Remanejados",
+            "ALICE MARTINS SILVA": "Transferidos/Remanejados",
+            "CAROLINA AKEMI": "Transferidos/Remanejados",
+            "CAROLINA AKEMI ISHIKAWA": "Transferidos/Remanejados",
+            "ISABEL SIMOES": "Transferidos/Remanejados",
+            "ISABEL SIMOES HOISEL": "Transferidos/Remanejados",
+        },
+    },
     "6B": {
         "nomes": {
             "LIVIA KEIKO": "Transferidos/Remanejados",
