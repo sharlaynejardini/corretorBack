@@ -1174,6 +1174,67 @@ def _montar_excel_relatorios_ausentes_escola(db: Session, escola_id: str, bimest
         raise HTTPException(status_code=404, detail="Turma nao encontrada")
 
     workbook = Workbook()
+    planilha = workbook.active
+    planilha.title = "Ausentes"
+    cabecalho = ["Turma", "Nº", "Aluno", "Dia 1", "Dia 2", "Status"]
+    preenchimento_cabecalho = PatternFill("solid", fgColor="FEE2E2")
+
+    planilha.append(
+        [
+            f"Alunos sem avaliacao - {escola.nome} - Todas as turmas - "
+            f"{bimestre}º bimestre"
+        ]
+    )
+    planilha.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(cabecalho))
+    planilha.append(cabecalho)
+
+    for turma in turmas:
+        dados = _montar_relatorio_ausentes_turma(db, str(turma.id), escola_id, bimestre)
+        for aluno in dados["alunos"]:
+            planilha.append(
+                [
+                    dados["turma"],
+                    aluno["numero_chamada"],
+                    aluno["aluno"],
+                    "Nao realizou"
+                    if aluno["ausente_dia_1"]
+                    else "-" if aluno["ausente_dia_1"] is None else "Realizou",
+                    "Nao realizou"
+                    if aluno["ausente_dia_2"]
+                    else "-" if aluno["ausente_dia_2"] is None else "Realizou",
+                    aluno["status"],
+                ]
+            )
+
+    titulo = planilha[1][0]
+    titulo.font = Font(bold=True, size=14)
+    titulo.alignment = Alignment(horizontal="center")
+
+    for celula in planilha[2]:
+        celula.font = Font(bold=True)
+        celula.fill = preenchimento_cabecalho
+        celula.alignment = Alignment(horizontal="center")
+
+    planilha.auto_filter.ref = planilha.dimensions
+    planilha.freeze_panes = "A3"
+
+    for coluna in planilha.columns:
+        largura = max(len(str(celula.value or "")) for celula in coluna) + 2
+        planilha.column_dimensions[get_column_letter(coluna[0].column)].width = min(
+            max(largura, 12),
+            42,
+        )
+
+    for linha in planilha.iter_rows(min_row=3):
+        for celula in linha:
+            celula.alignment = Alignment(vertical="center")
+
+    arquivo = BytesIO()
+    workbook.save(arquivo)
+    arquivo.seek(0)
+    return arquivo
+
+    workbook = Workbook()
     abas_usadas = set()
     cabecalho = ["NÃ‚Âº", "Aluno", "Dia 1", "Dia 2", "Status"]
     preenchimento_cabecalho = PatternFill("solid", fgColor="FEE2E2")
