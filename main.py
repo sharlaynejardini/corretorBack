@@ -1011,6 +1011,8 @@ def _montar_relatorio_ausentes_turma(db: Session, turma_id: str, escola_id: str,
             aluno.nome,
         )
         transferido = bool(status_transferencia)
+        if transferido:
+            continue
 
         linhas.append(
             {
