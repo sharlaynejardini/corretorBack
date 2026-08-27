@@ -523,7 +523,7 @@ def processar_folha(caminho_arquivo, total_questoes=None):
         original = imagem.copy()
         bordas = _bordas_imagem(imagem)
 
-        if total_questoes == 30:
+        if total_questoes in {20, 30}:
             def preparar_recortes_takaoka(incluir_inclinacoes=False):
                 imagens_candidatas = _preparar_candidatos_imagem(
                     original,
@@ -548,7 +548,11 @@ def processar_folha(caminho_arquivo, total_questoes=None):
                     if recorte is not None
                     and recorte.shape[0] >= 200
                     and recorte.shape[1] >= 380
-                    and 1.50 <= recorte.shape[1] / float(max(recorte.shape[0], 1)) <= 2.40
+                    and (
+                        0.85 <= recorte.shape[1] / float(max(recorte.shape[0], 1)) <= 1.30
+                        if total_questoes == 20
+                        else 1.50 <= recorte.shape[1] / float(max(recorte.shape[0], 1)) <= 2.40
+                    )
                 ]
 
             melhor = _melhor_recorte_takaoka(
@@ -1287,6 +1291,101 @@ def _ler_grade_takaoka_15x2(folha_threshold):
     return respostas, debug
 
 
+def _ler_grade_daniela_10x2(folha_threshold):
+    altura, largura = folha_threshold.shape
+    proporcao = largura / float(max(altura, 1))
+
+    if not 0.85 <= proporcao <= 1.30:
+        return None
+
+    tabelas = [
+        (1, 0.084, 0.916, [0.230, 0.284, 0.339, 0.393, 0.448, 0.502], "superior"),
+        (11, 0.084, 0.916, [0.668, 0.723, 0.778, 0.832, 0.887, 0.946], "inferior"),
+    ]
+    respostas = {}
+    debug = []
+
+    for questao_inicial, inicio_x, fim_x, limites_y, bloco in tabelas:
+        x_tabela_1 = int(largura * inicio_x)
+        x_tabela_2 = int(largura * fim_x)
+        largura_celula = (x_tabela_2 - x_tabela_1) / 10
+        margem_x = max(int(largura_celula * 0.14), 3)
+        margem_y = max(int(altura * 0.005), 2)
+
+        for deslocamento in range(10):
+            questao = questao_inicial + deslocamento
+            x1 = max(int(x_tabela_1 + deslocamento * largura_celula + margem_x), 0)
+            x2 = min(int(x_tabela_1 + (deslocamento + 1) * largura_celula - margem_x), largura)
+            contagens = {}
+            regioes = {}
+
+            for indice_alternativa, alternativa in enumerate(("A", "B", "C", "D", "E")):
+                y1 = max(int(altura * limites_y[indice_alternativa] + margem_y), 0)
+                y2 = min(int(altura * limites_y[indice_alternativa + 1] - margem_y), altura)
+
+                if x2 <= x1 or y2 <= y1:
+                    pixels = 0
+                else:
+                    pixels = int(cv2.countNonZero(folha_threshold[y1:y2, x1:x2]))
+
+                contagens[alternativa] = pixels
+                regioes[alternativa] = {
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                }
+
+            melhor_alternativa = max(contagens, key=contagens.get)
+            ordenadas = sorted(contagens.values(), reverse=True)
+            maior_pixels = ordenadas[0] if ordenadas else 0
+            segundo_maior = ordenadas[1] if len(ordenadas) > 1 else 0
+            diferenca = maior_pixels - segundo_maior
+            confianca = round(maior_pixels / max(segundo_maior, 1), 2)
+            altura_regiao = max(
+                int(altura * (limites_y[1] - limites_y[0]) - (2 * margem_y)),
+                1,
+            )
+            area_regiao = max((x2 - x1) * altura_regiao, 1)
+            minimo_marcacao = max(int(area_regiao * 0.08), 30)
+            resposta_final = melhor_alternativa
+
+            if maior_pixels < minimo_marcacao:
+                resposta_final = None
+            elif segundo_maior > 0 and confianca < 1.25 and diferenca < int(minimo_marcacao * 1.6):
+                resposta_final = None
+
+            respostas[questao] = resposta_final
+            debug.append(
+                {
+                    "questao": questao,
+                    "resposta": resposta_final,
+                    "bloco": bloco,
+                    "contagens": contagens,
+                    "maior_pixels": maior_pixels,
+                    "segundo_maior_pixels": segundo_maior,
+                    "diferenca_pixels": diferenca,
+                    "confianca": confianca,
+                    "minimo_marcacao": minimo_marcacao,
+                    "centro_x": int((x1 + x2) / 2),
+                    "centros_y": {
+                        alternativa: int(
+                            (
+                                regioes[alternativa]["y1"]
+                                + regioes[alternativa]["y2"]
+                            )
+                            / 2
+                        )
+                        for alternativa in regioes
+                    },
+                    "regioes": regioes,
+                    "tentativa_grade": {"metodo": "daniela_10x2"},
+                }
+            )
+
+    return respostas, debug
+
+
 def _ler_grade_agenor_recorte(folha_threshold):
     imagem = folha_threshold
 
@@ -1539,18 +1638,19 @@ def _avaliar_recorte_takaoka(recorte, total_questoes):
     respostas_validas = [
         resposta
         for resposta in respostas.values()
-        if resposta in {"A", "B", "C", "D"}
+        if resposta in {"A", "B", "C", "D", "E"}
     ]
     respondidas = len(respostas_validas)
     vazias = max(total_questoes - respondidas, 0)
     alternativas_usadas = len(set(respostas_validas))
     dominante = (
-        max(respostas_validas.count(alternativa) for alternativa in {"A", "B", "C", "D"})
+        max(respostas_validas.count(alternativa) for alternativa in {"A", "B", "C", "D", "E"})
         if respostas_validas
         else 0
     )
     proporcao = recorte.shape[1] / float(max(recorte.shape[0], 1))
-    penalidade_proporcao = abs(proporcao - 1.9) * 2000
+    proporcao_esperada = 1.05 if total_questoes == 20 else 1.9
+    penalidade_proporcao = abs(proporcao - proporcao_esperada) * 2000
     pontuacao = (
         _pontuar_gabarito_takaoka(recorte)
         + _pontuar_debug(debug)
@@ -1566,7 +1666,11 @@ def _avaliar_recorte_takaoka(recorte, total_questoes):
 
 def _melhor_recorte_takaoka(recortes, total_questoes):
     melhor = None
-    recortes = sorted(recortes, key=_pontuar_gabarito_takaoka, reverse=True)[:10]
+    recortes = sorted(
+        recortes,
+        key=lambda recorte: _pontuar_recorte_por_total(recorte, total_questoes),
+        reverse=True,
+    )[:10]
 
     for recorte in recortes:
         try:
@@ -1581,10 +1685,21 @@ def _melhor_recorte_takaoka(recortes, total_questoes):
         return melhor
 
     if recortes:
-        recorte = max(recortes, key=_pontuar_gabarito_takaoka)
-        return _pontuar_gabarito_takaoka(recorte), recorte, 0
+        recorte = max(recortes, key=lambda item: _pontuar_recorte_por_total(item, total_questoes))
+        return _pontuar_recorte_por_total(recorte, total_questoes), recorte, 0
 
     return None
+
+
+def _pontuar_recorte_por_total(recorte, total_questoes):
+    pontuacao = _pontuar_gabarito_takaoka(recorte)
+
+    if total_questoes == 20:
+        altura, largura = recorte.shape[:2]
+        proporcao = largura / float(max(altura, 1))
+        pontuacao -= abs(proporcao - 1.05) * 3000
+
+    return pontuacao
 
 
 def _ler_grade_com_tentativas(folha_threshold, total_questoes):
@@ -1592,6 +1707,11 @@ def _ler_grade_com_tentativas(folha_threshold, total_questoes):
 
     if total_questoes == 14:
         return _ler_grade_daniela_14(folha_threshold)
+
+    if total_questoes == 20:
+        leitura_daniela_10x2 = _ler_grade_daniela_10x2(folha_threshold)
+        if leitura_daniela_10x2 is not None:
+            return leitura_daniela_10x2
 
     if total_questoes not in {25, 30}:
         grade = _grade_questoes(largura, altura, total_questoes)
@@ -1721,11 +1841,12 @@ def _ler_grade_com_tentativas(folha_threshold, total_questoes):
 
 def ler_respostas_grade_fixa(folha_threshold, total_questoes=22):
     """
-    Le respostas de uma grade fixa com alternativas A/B/C/D.
+    Le respostas de uma grade fixa com alternativas A/B/C/D/E.
 
     O total de questoes deve vir do gabarito oficial:
     - 22 para EMEF DEP. AGENOR LINO DE MATTOS no 1o bimestre
     - 25 para EMEF DEP. AGENOR LINO DE MATTOS no 2o bimestre
+    - 20 para EMEF MARIA VILANI DANIELA PINHEIRO no Simulado Agosto
     - 30 para EMEF YOJIRO TAKAOKA
     """
     if folha_threshold is None:

@@ -19,7 +19,7 @@ from processador_imagem import ler_respostas_grade_fixa, processar_folha
 
 
 UPLOAD_DIR = os.getenv("UPLOAD_DIR", "/tmp/uploads" if os.getenv("VERCEL") else "uploads")
-ALTERNATIVAS_VALIDAS = {"A", "B", "C", "D", "X"}
+ALTERNATIVAS_VALIDAS = {"A", "B", "C", "D", "E", "X"}
 GABARITO_PADRAO = "PADRAO"
 GABARITO_ADAPTADA = "ADAPTADA"
 ORDEM_DISCIPLINAS_RESULTADO = [
@@ -173,7 +173,7 @@ def _preparar_banco():
                 """
                 alter table if exists gabaritos
                 add constraint gabaritos_resposta_correta_check
-                check (resposta_correta in ('A', 'B', 'C', 'D', 'X'))
+                check (resposta_correta in ('A', 'B', 'C', 'D', 'E', 'X'))
                 """
             )
         )
@@ -190,7 +190,7 @@ def _preparar_banco():
                 """
                 alter table if exists respostas_alunos
                 add constraint respostas_alunos_resposta_aluno_check
-                check (resposta_aluno in ('A', 'B', 'C', 'D', 'X'))
+                check (resposta_aluno in ('A', 'B', 'C', 'D', 'E', 'X'))
                 """
             )
         )
@@ -207,7 +207,7 @@ def _preparar_banco():
                 """
                 alter table if exists respostas_alunos
                 add constraint respostas_alunos_resposta_correta_check
-                check (resposta_correta in ('A', 'B', 'C', 'D', 'X'))
+                check (resposta_correta in ('A', 'B', 'C', 'D', 'E', 'X'))
                 """
             )
         )
@@ -1377,7 +1377,7 @@ def salvar_gabarito(
     respostas_lista = [_normalizar_resposta(resposta) for resposta in respostas.split(",") if resposta.strip()]
 
     if any(resposta is None for resposta in respostas_lista):
-        raise HTTPException(status_code=400, detail="Use somente alternativas A, B, C, D ou X")
+        raise HTTPException(status_code=400, detail="Use somente alternativas A, B, C, D, E ou X")
 
     total_esperado = sum(disciplina.quantidade_questoes for disciplina in disciplinas)
     if len(respostas_lista) != total_esperado:
@@ -1465,7 +1465,7 @@ def corrigir_manual(
     respostas_lista = [_normalizar_resposta(resposta) for resposta in respostas.split(",") if resposta.strip()]
 
     if any(resposta is None for resposta in respostas_lista):
-        raise HTTPException(status_code=400, detail="Use somente alternativas A, B, C ou D")
+        raise HTTPException(status_code=400, detail="Use somente alternativas A, B, C, D ou E")
 
     if len(respostas_lista) < len(gabaritos) or (
         len(respostas_lista) > len(gabaritos) and not _modelo_eh_daniela(db, modelo)
