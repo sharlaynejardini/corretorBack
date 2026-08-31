@@ -432,15 +432,20 @@ def _questao_anulada(resposta_correta):
 
 
 def _reordenar_respostas_aluno(modelo, serie: int, codigo_gabarito: str, respostas_detectadas):
+    codigo_gabarito = _normalizar_codigo_gabarito(codigo_gabarito)
+    serie = int(serie)
+
     if (
         int(getattr(modelo, "bimestre", 0)) != 3
         or int(getattr(modelo, "dia", 0)) != 1
-        or int(serie) != 8
-        or _normalizar_codigo_gabarito(codigo_gabarito) != "8B_SUBSTITUTIVA"
+        or (serie, codigo_gabarito) not in {
+            (8, "8B_SUBSTITUTIVA"),
+            (9, "CADERNO_A"),
+        }
     ):
         return respostas_detectadas
 
-    # A folha substitutiva do 8B vem como EF, LP, Historia, Geografia.
+    # Algumas folhas substitutivas vem como EF, LP, Historia, Geografia.
     # Para relatorio e comparacao, salvamos como LP, Historia, Geografia, EF.
     mapa_questoes = {
         **{destino: origem for destino, origem in zip(range(1, 13), range(7, 19))},
