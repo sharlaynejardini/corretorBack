@@ -434,25 +434,37 @@ def _questao_anulada(resposta_correta):
 def _reordenar_respostas_aluno(modelo, serie: int, codigo_gabarito: str, respostas_detectadas):
     codigo_gabarito = _normalizar_codigo_gabarito(codigo_gabarito)
     serie = int(serie)
+    dia = int(getattr(modelo, "dia", 0))
 
     if (
         int(getattr(modelo, "bimestre", 0)) != 3
-        or int(getattr(modelo, "dia", 0)) != 1
-        or (serie, codigo_gabarito) not in {
-            (8, "8B_SUBSTITUTIVA"),
-            (9, "SUBSTITUTIVA"),
-        }
     ):
         return respostas_detectadas
 
-    # Algumas folhas substitutivas vem como EF, LP, Historia, Geografia.
-    # Para relatorio e comparacao, salvamos como LP, Historia, Geografia, EF.
-    mapa_questoes = {
-        **{destino: origem for destino, origem in zip(range(1, 13), range(7, 19))},
-        **{destino: origem for destino, origem in zip(range(13, 19), range(19, 25))},
-        **{destino: origem for destino, origem in zip(range(19, 25), range(25, 31))},
-        **{destino: origem for destino, origem in zip(range(25, 31), range(1, 7))},
+    mapas_questoes = {
+        (1, 8, "8B_SUBSTITUTIVA"): {
+            **{destino: origem for destino, origem in zip(range(1, 13), range(7, 19))},
+            **{destino: origem for destino, origem in zip(range(13, 19), range(19, 25))},
+            **{destino: origem for destino, origem in zip(range(19, 25), range(25, 31))},
+            **{destino: origem for destino, origem in zip(range(25, 31), range(1, 7))},
+        },
+        (1, 9, "SUBSTITUTIVA"): {
+            **{destino: origem for destino, origem in zip(range(1, 13), range(7, 19))},
+            **{destino: origem for destino, origem in zip(range(13, 19), range(19, 25))},
+            **{destino: origem for destino, origem in zip(range(19, 25), range(25, 31))},
+            **{destino: origem for destino, origem in zip(range(25, 31), range(1, 7))},
+        },
+        (2, 6, "SUBSTITUTIVA"): {
+            **{questao: questao for questao in range(1, 13)},
+            **{destino: origem for destino, origem in zip(range(13, 19), range(19, 25))},
+            **{destino: origem for destino, origem in zip(range(19, 25), range(25, 31))},
+            **{destino: origem for destino, origem in zip(range(25, 31), range(13, 19))},
+        },
     }
+    mapa_questoes = mapas_questoes.get((dia, serie, codigo_gabarito))
+
+    if not mapa_questoes:
+        return respostas_detectadas
 
     return {
         destino: (
