@@ -431,6 +431,33 @@ def _questao_anulada(resposta_correta):
     return _normalizar_resposta(resposta_correta) == "X"
 
 
+def _reordenar_respostas_aluno(modelo, serie: int, codigo_gabarito: str, respostas_detectadas):
+    if (
+        int(getattr(modelo, "bimestre", 0)) != 3
+        or int(getattr(modelo, "dia", 0)) != 1
+        or int(serie) != 8
+        or _normalizar_codigo_gabarito(codigo_gabarito) != "8B_SUBSTITUTIVA"
+    ):
+        return respostas_detectadas
+
+    # A folha substitutiva do 8B vem como EF, LP, Historia, Geografia.
+    # Para relatorio e comparacao, salvamos como LP, Historia, Geografia, EF.
+    mapa_questoes = {
+        **{destino: origem for destino, origem in zip(range(1, 13), range(7, 19))},
+        **{destino: origem for destino, origem in zip(range(13, 19), range(19, 25))},
+        **{destino: origem for destino, origem in zip(range(19, 25), range(25, 31))},
+        **{destino: origem for destino, origem in zip(range(25, 31), range(1, 7))},
+    }
+
+    return {
+        destino: (
+            respostas_detectadas.get(origem)
+            or respostas_detectadas.get(str(origem))
+        )
+        for destino, origem in mapa_questoes.items()
+    }
+
+
 def _salvar_upload(foto: UploadFile, conteudo: bytes):
     if not foto.filename:
         raise HTTPException(status_code=400, detail="Arquivo sem nome")
@@ -1480,6 +1507,12 @@ def corrigir_manual(
     respostas_detectadas = {
         indice + 1: resposta for indice, resposta in enumerate(respostas_lista)
     }
+    respostas_detectadas = _reordenar_respostas_aluno(
+        modelo,
+        serie,
+        codigo_gabarito,
+        respostas_detectadas,
+    )
 
     try:
         acertos, respostas_salvas = _comparar_e_salvar_respostas(
@@ -1563,6 +1596,13 @@ async def corrigir_foto(
         )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Erro ao ler respostas: {exc}") from exc
+
+    respostas_detectadas = _reordenar_respostas_aluno(
+        modelo,
+        serie,
+        codigo_gabarito,
+        respostas_detectadas,
+    )
 
     try:
         acertos, respostas_salvas = _comparar_e_salvar_respostas(
@@ -1662,6 +1702,13 @@ def corrigir_foto_existente(
         )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Erro ao ler respostas: {exc}") from exc
+
+    respostas_detectadas = _reordenar_respostas_aluno(
+        modelo,
+        serie,
+        codigo_gabarito,
+        respostas_detectadas,
+    )
 
     try:
         acertos, respostas_salvas = _comparar_e_salvar_respostas(
