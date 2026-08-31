@@ -466,6 +466,12 @@ def _reordenar_respostas_aluno(modelo, serie: int, codigo_gabarito: str, respost
             **{destino: origem for destino, origem in zip(range(19, 25), range(13, 19))},
             **{destino: origem for destino, origem in zip(range(25, 31), range(1, 7))},
         },
+        (2, 8, "CADERNO_B"): {
+            **{destino: origem for destino, origem in zip(range(1, 13), range(7, 19))},
+            **{destino: origem for destino, origem in zip(range(13, 19), range(19, 25))},
+            **{destino: origem for destino, origem in zip(range(19, 25), range(25, 31))},
+            **{destino: origem for destino, origem in zip(range(25, 31), range(1, 7))},
+        },
     }
     mapa_questoes = mapas_questoes.get((dia, serie, codigo_gabarito))
 
