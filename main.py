@@ -440,7 +440,7 @@ def _reordenar_respostas_aluno(modelo, serie: int, codigo_gabarito: str, respost
         or int(getattr(modelo, "dia", 0)) != 1
         or (serie, codigo_gabarito) not in {
             (8, "8B_SUBSTITUTIVA"),
-            (9, "CADERNO_A"),
+            (9, "SUBSTITUTIVA"),
         }
     ):
         return respostas_detectadas
