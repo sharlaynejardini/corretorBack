@@ -1628,6 +1628,7 @@ async def corrigir_foto(
         respostas_detectadas, debug_respostas = ler_respostas_grade_fixa(
             resultado_processamento["folha_threshold"],
             total_questoes=total_questoes,
+            folha_threshold_grade=resultado_processamento.get("folha_threshold_grade"),
         )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Erro ao ler respostas: {exc}") from exc
@@ -1734,6 +1735,7 @@ def corrigir_foto_existente(
         respostas_detectadas, debug_respostas = ler_respostas_grade_fixa(
             resultado_processamento["folha_threshold"],
             total_questoes=total_questoes,
+            folha_threshold_grade=resultado_processamento.get("folha_threshold_grade"),
         )
     except Exception as exc:
         raise HTTPException(status_code=422, detail=f"Erro ao ler respostas: {exc}") from exc

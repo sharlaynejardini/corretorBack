@@ -575,11 +575,13 @@ def processar_folha(caminho_arquivo, total_questoes=None):
 
             if folha is not None:
                 folha_cinza, folha_threshold = _preparar_leitura_takaoka(folha)
+                _, folha_threshold_grade = _limiarizar_folha(folha)
 
                 return {
                     "folha": folha,
                     "folha_cinza": folha_cinza,
                     "folha_threshold": folha_threshold,
+                    "folha_threshold_grade": folha_threshold_grade,
                 }, None
 
         candidatos = []
@@ -1291,7 +1293,165 @@ def _ler_grade_takaoka_15x2(folha_threshold):
     return respostas, debug
 
 
-def _ler_grade_daniela_10x2(folha_threshold):
+def _detectar_blocos_daniela_10x2(folha_threshold):
+    altura, largura = folha_threshold.shape
+    kernel_vertical = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (1, max(int(altura * 0.09), 18)),
+    )
+    kernel_horizontal = cv2.getStructuringElement(
+        cv2.MORPH_RECT,
+        (max(int(largura * 0.16), 45), 1),
+    )
+    linhas_verticais = cv2.morphologyEx(folha_threshold, cv2.MORPH_OPEN, kernel_vertical)
+    linhas_horizontais = cv2.morphologyEx(folha_threshold, cv2.MORPH_OPEN, kernel_horizontal)
+    grade = cv2.add(linhas_verticais, linhas_horizontais)
+
+    contornos = cv2.findContours(
+        grade.copy(),
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    contornos = imutils.grab_contours(contornos)
+    blocos = []
+
+    for contorno in contornos:
+        x, y, w, h = cv2.boundingRect(contorno)
+        proporcao = w / float(max(h, 1))
+
+        if w < largura * 0.55 or h < altura * 0.18:
+            continue
+
+        if not 1.80 <= proporcao <= 4.20:
+            continue
+
+        blocos.append((x, y, w, h))
+
+    if len(blocos) < 2:
+        return None
+
+    blocos = sorted(blocos, key=lambda bloco: bloco[2] * bloco[3], reverse=True)[:4]
+    blocos = sorted(blocos, key=lambda bloco: bloco[1])[:2]
+
+    return blocos, linhas_verticais, linhas_horizontais
+
+
+def _ler_grade_daniela_10x2_por_linhas(folha_threshold, folha_threshold_grade=None):
+    threshold_grade = folha_threshold_grade if folha_threshold_grade is not None else folha_threshold
+    blocos_info = _detectar_blocos_daniela_10x2(threshold_grade)
+
+    if blocos_info is None:
+        return None
+
+    blocos, linhas_verticais, linhas_horizontais = blocos_info
+    respostas = {}
+    debug = []
+
+    for indice_bloco, bloco in enumerate(blocos):
+        x, y, w, h = bloco
+        questao_inicial = 1 if indice_bloco == 0 else 11
+        recorte_vertical = linhas_verticais[y : y + h, x : x + w]
+        recorte_horizontal = linhas_horizontais[y : y + h, x : x + w]
+        xs = _clusters_linhas(
+            np.sum(recorte_vertical > 0, axis=0),
+            max(int(h * 0.35), 12),
+        )
+        ys = _clusters_linhas(
+            np.sum(recorte_horizontal > 0, axis=1),
+            max(int(w * 0.35), 18),
+        )
+
+        intervalos_x = _intervalos_linhas(xs)
+        intervalos_y = _intervalos_linhas(ys)
+
+        if len(intervalos_x) < 10 or len(intervalos_y) < 5:
+            return None
+
+        intervalos_x = sorted(intervalos_x, key=lambda intervalo: intervalo[0])[-10:]
+        intervalos_y = sorted(intervalos_y, key=lambda intervalo: intervalo[0])[-5:]
+
+        for deslocamento, intervalo_x in enumerate(intervalos_x):
+            questao = questao_inicial + deslocamento
+            contagens = {}
+            regioes = {}
+
+            for alternativa, intervalo_y in zip(("A", "B", "C", "D", "E"), intervalos_y):
+                largura_celula = intervalo_x[1] - intervalo_x[0]
+                altura_celula = intervalo_y[1] - intervalo_y[0]
+                margem_x = max(int(largura_celula * 0.14), 3)
+                margem_y = max(int(altura_celula * 0.12), 2)
+                x1 = x + intervalo_x[0] + margem_x
+                x2 = x + intervalo_x[1] - margem_x
+                y1 = y + intervalo_y[0] + margem_y
+                y2 = y + intervalo_y[1] - margem_y
+
+                if x2 <= x1 or y2 <= y1:
+                    pixels = 0
+                else:
+                    pixels = int(cv2.countNonZero(folha_threshold[y1:y2, x1:x2]))
+
+                contagens[alternativa] = pixels
+                regioes[alternativa] = {
+                    "x1": x1,
+                    "y1": y1,
+                    "x2": x2,
+                    "y2": y2,
+                }
+
+            melhor_alternativa = max(contagens, key=contagens.get)
+            ordenadas = sorted(contagens.values(), reverse=True)
+            maior_pixels = ordenadas[0] if ordenadas else 0
+            segundo_maior = ordenadas[1] if len(ordenadas) > 1 else 0
+            diferenca = maior_pixels - segundo_maior
+            confianca = round(maior_pixels / max(segundo_maior, 1), 2)
+            regiao_melhor = regioes[melhor_alternativa]
+            area_regiao = max(
+                (regiao_melhor["x2"] - regiao_melhor["x1"])
+                * (regiao_melhor["y2"] - regiao_melhor["y1"]),
+                1,
+            )
+            minimo_marcacao = max(int(area_regiao * 0.10), 30)
+            resposta_final = melhor_alternativa
+
+            if maior_pixels < minimo_marcacao:
+                resposta_final = None
+            elif segundo_maior > 0 and confianca < 1.25 and diferenca < int(minimo_marcacao * 1.6):
+                resposta_final = None
+
+            respostas[questao] = resposta_final
+            debug.append(
+                {
+                    "questao": questao,
+                    "resposta": resposta_final,
+                    "bloco": "superior" if indice_bloco == 0 else "inferior",
+                    "contagens": contagens,
+                    "maior_pixels": maior_pixels,
+                    "segundo_maior_pixels": segundo_maior,
+                    "diferenca_pixels": diferenca,
+                    "confianca": confianca,
+                    "minimo_marcacao": minimo_marcacao,
+                    "centro_x": int((regiao_melhor["x1"] + regiao_melhor["x2"]) / 2),
+                    "centros_y": {
+                        alternativa: int((regiao["y1"] + regiao["y2"]) / 2)
+                        for alternativa, regiao in regioes.items()
+                    },
+                    "regioes": regioes,
+                    "tentativa_grade": {"metodo": "daniela_10x2_linhas"},
+                }
+            )
+
+    return respostas, debug
+
+
+def _ler_grade_daniela_10x2(folha_threshold, folha_threshold_grade=None):
+    leitura_por_linhas = _ler_grade_daniela_10x2_por_linhas(
+        folha_threshold,
+        folha_threshold_grade,
+    )
+
+    if leitura_por_linhas is not None:
+        return leitura_por_linhas
+
     altura, largura = folha_threshold.shape
     proporcao = largura / float(max(altura, 1))
 
@@ -1702,14 +1862,17 @@ def _pontuar_recorte_por_total(recorte, total_questoes):
     return pontuacao
 
 
-def _ler_grade_com_tentativas(folha_threshold, total_questoes):
+def _ler_grade_com_tentativas(folha_threshold, total_questoes, folha_threshold_grade=None):
     altura, largura = folha_threshold.shape
 
     if total_questoes == 14:
         return _ler_grade_daniela_14(folha_threshold)
 
     if total_questoes == 20:
-        leitura_daniela_10x2 = _ler_grade_daniela_10x2(folha_threshold)
+        leitura_daniela_10x2 = _ler_grade_daniela_10x2(
+            folha_threshold,
+            folha_threshold_grade,
+        )
         if leitura_daniela_10x2 is not None:
             return leitura_daniela_10x2
 
@@ -1839,7 +2002,7 @@ def _ler_grade_com_tentativas(folha_threshold, total_questoes):
     return respostas, debug
 
 
-def ler_respostas_grade_fixa(folha_threshold, total_questoes=22):
+def ler_respostas_grade_fixa(folha_threshold, total_questoes=22, folha_threshold_grade=None):
     """
     Le respostas de uma grade fixa com alternativas A/B/C/D/E.
 
@@ -1855,4 +2018,8 @@ def ler_respostas_grade_fixa(folha_threshold, total_questoes=22):
     if len(folha_threshold.shape) != 2:
         raise ValueError("A leitura espera uma imagem threshold em escala de cinza")
 
-    return _ler_grade_com_tentativas(folha_threshold, total_questoes)
+    return _ler_grade_com_tentativas(
+        folha_threshold,
+        total_questoes,
+        folha_threshold_grade=folha_threshold_grade,
+    )
