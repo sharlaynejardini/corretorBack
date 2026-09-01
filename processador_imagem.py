@@ -1443,15 +1443,15 @@ def _ler_grade_daniela_10x2_por_linhas(folha_threshold, folha_threshold_grade=No
     return respostas, debug
 
 
-def _ler_grade_daniela_10x2(folha_threshold, folha_threshold_grade=None):
-    leitura_por_linhas = _ler_grade_daniela_10x2_por_linhas(
-        folha_threshold,
-        folha_threshold_grade,
-    )
+def _contar_respostas_validas(leitura):
+    if leitura is None:
+        return -1
 
-    if leitura_por_linhas is not None:
-        return leitura_por_linhas
+    respostas, _debug = leitura
+    return sum(1 for resposta in respostas.values() if resposta in {"A", "B", "C", "D", "E"})
 
+
+def _ler_grade_daniela_10x2_fixa(folha_threshold):
     altura, largura = folha_threshold.shape
     proporcao = largura / float(max(altura, 1))
 
@@ -1544,6 +1544,19 @@ def _ler_grade_daniela_10x2(folha_threshold, folha_threshold_grade=None):
             )
 
     return respostas, debug
+
+
+def _ler_grade_daniela_10x2(folha_threshold, folha_threshold_grade=None):
+    leitura_fixa = _ler_grade_daniela_10x2_fixa(folha_threshold)
+    leitura_por_linhas = _ler_grade_daniela_10x2_por_linhas(
+        folha_threshold,
+        folha_threshold_grade,
+    )
+
+    if _contar_respostas_validas(leitura_por_linhas) > _contar_respostas_validas(leitura_fixa):
+        return leitura_por_linhas
+
+    return leitura_fixa
 
 
 def _ler_grade_agenor_recorte(folha_threshold):
