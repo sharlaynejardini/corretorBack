@@ -338,7 +338,7 @@ def _codigo_gabarito_turma(nome_escola: str, nome_turma: str, serie: int, bimest
     escola_normalizada = _normalizar_texto(nome_escola)
     turma_normalizada = _normalizar_texto(nome_turma).replace(" ", "")
 
-    if "AGENOR" in escola_normalizada and bimestre == 2:
+    if "AGENOR" in escola_normalizada and bimestre in {2, 3}:
         if dia == 1:
             return "CADERNO_A"
 
