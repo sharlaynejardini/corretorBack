@@ -210,7 +210,7 @@ GABARITOS = {
         "A",
     ],
     (2, 8, "CADERNO_B"): [
-        "C",
+        "D",
         "B",
         "D",
         "B",
