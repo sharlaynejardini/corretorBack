@@ -268,7 +268,11 @@ def _status_transferencia_relatorio(
     nome_turma: str,
     numero_chamada: int | None,
     nome_aluno: str = "",
+    escola_nome: str = "",
 ):
+    if "AGENOR" in _normalizar_texto(escola_nome):
+        return None
+
     turma = _normalizar_texto(nome_turma).replace(" ", "")
     transferidos_turma = TRANSFERIDOS_RELATORIO_POR_TURMA.get(turma, {})
     status_por_numero = transferidos_turma.get(numero_chamada)
@@ -1018,6 +1022,7 @@ def _montar_resultado_final_escola(db: Session, escola_id: str, bimestre: int):
             turma.nome if turma else "",
             aluno.numero_chamada,
             aluno.nome,
+            escola_nome,
         )
         transferido = bool(status_transferencia)
 
@@ -1103,6 +1108,7 @@ def _montar_relatorio_ausentes_turma(db: Session, turma_id: str, escola_id: str,
             turma.nome,
             aluno.numero_chamada,
             aluno.nome,
+            escola.nome,
         )
         transferido = bool(status_transferencia)
         if transferido:
