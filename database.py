@@ -8,8 +8,12 @@ load_dotenv()
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# SQLAlchemy 2.1 defaults to psycopg (v3), but this project installs psycopg2.
+if DATABASE_URL:
+    for prefix in ("postgres://", "postgresql://"):
+        if DATABASE_URL.startswith(prefix):
+            DATABASE_URL = "postgresql+psycopg2://" + DATABASE_URL[len(prefix):]
+            break
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True) if DATABASE_URL else None
 
