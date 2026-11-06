@@ -798,6 +798,12 @@ def _tabular_respostas(respostas):
     for resumo in por_disciplina.values():
         resumo["nota"] = _calcular_nota(resumo["acertos"], resumo["total"])
 
+    if any(_normalizar_disciplina_ordem(d) in ORDEM_DISCIPLINAS_RESULTADO for d in por_disciplina):
+        por_disciplina = {
+            disciplina: por_disciplina[disciplina]
+            for disciplina in _ordenar_disciplinas_resultado(por_disciplina)
+        }
+
     return {
         "por_questao": por_questao,
         "por_disciplina": por_disciplina,

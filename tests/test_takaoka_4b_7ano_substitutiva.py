@@ -10,7 +10,7 @@ with patch.dict(os.environ, {"DATABASE_URL": ""}):
     import models
     import seed_takaoka_4b_7ano_substitutiva_dia1 as seed
     from database import Base
-    from main import buscar_modelo_prova, salvar_gabarito, _comparar_e_salvar_respostas
+    from main import buscar_modelo_prova, salvar_gabarito, _comparar_e_salvar_respostas, _tabular_respostas
 
 
 class TakaokaSubstitutivaTest(unittest.TestCase):
@@ -81,6 +81,11 @@ class TakaokaSubstitutivaTest(unittest.TestCase):
             self.assertEqual(salvas[0]["disciplina"], "Ed. Fisica")
             self.assertFalse(salvas[0]["acertou"])
             self.assertTrue(salvas[13]["acertou"])
+            tabulado = _tabular_respostas(salvas)
+            self.assertEqual(list(tabulado["por_disciplina"]),
+                             ["Portugues", "Historia", "Geografia", "Ed. Fisica"])
+            self.assertEqual(tabulado["por_disciplina"]["Portugues"]["total"], 12)
+            self.assertEqual(tabulado["linhas"][0]["numero_questao"], 1)
 
 
 if __name__ == "__main__":
