@@ -4,6 +4,7 @@ import unicodedata
 import uuid
 from io import BytesIO
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
 import cv2
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile
@@ -1405,18 +1406,50 @@ def buscar_modelo_prova(
     escola_id: str,
     bimestre: int,
     dia: int,
+    serie: int | None = None,
+    codigo_gabarito: str = GABARITO_PADRAO,
     db: Session = Depends(get_db),
 ):
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
+    disciplinas = _disciplinas_do_gabarito(db, modelo, serie, codigo_gabarito)
+    return {"modelo": modelo, "disciplinas": disciplinas}
 
+
+def _disciplinas_do_gabarito(db, modelo, serie=None, codigo_gabarito=GABARITO_PADRAO):
     disciplinas = (
         db.query(models.DisciplinaProva)
         .filter(models.DisciplinaProva.modelo_prova_id == modelo.id)
         .order_by(models.DisciplinaProva.ordem)
         .all()
     )
+    if serie is None:
+        return disciplinas
 
-    return {"modelo": modelo, "disciplinas": disciplinas}
+    gabaritos = (
+        db.query(models.Gabarito)
+        .filter_by(modelo_prova_id=modelo.id, serie=serie,
+                   codigo_gabarito=_normalizar_codigo_gabarito(codigo_gabarito))
+        .order_by(models.Gabarito.numero_questao)
+        .all()
+    )
+    if len(gabaritos) != sum(d.quantidade_questoes for d in disciplinas):
+        return disciplinas
+    # A substitutiva pode imprimir as disciplinas em outra ordem. O gabarito
+    # selecionado preserva essa ordem sem alterar o modelo da prova regular.
+    por_nome = {d.disciplina: d for d in disciplinas}
+    blocos = []
+    for gabarito in gabaritos:
+        if not blocos or blocos[-1].disciplina != gabarito.disciplina:
+            original = por_nome.get(gabarito.disciplina)
+            if original is None:
+                return disciplinas
+            blocos.append(SimpleNamespace(
+                id=original.id, modelo_prova_id=modelo.id,
+                disciplina=original.disciplina, sigla=original.sigla,
+                quantidade_questoes=0, ordem=len(blocos) + 1,
+            ))
+        blocos[-1].quantidade_questoes += 1
+    return blocos or disciplinas
 
 
 @app.post("/gabarito")
@@ -1432,12 +1465,7 @@ def salvar_gabarito(
     modelo = _buscar_modelo_prova(db, escola_id, bimestre, dia)
     codigo_gabarito = _normalizar_codigo_gabarito(codigo_gabarito)
 
-    disciplinas = (
-        db.query(models.DisciplinaProva)
-        .filter(models.DisciplinaProva.modelo_prova_id == modelo.id)
-        .order_by(models.DisciplinaProva.ordem)
-        .all()
-    )
+    disciplinas = _disciplinas_do_gabarito(db, modelo, serie, codigo_gabarito)
 
     if not disciplinas:
         raise HTTPException(status_code=404, detail="Disciplinas da prova nao encontradas")
