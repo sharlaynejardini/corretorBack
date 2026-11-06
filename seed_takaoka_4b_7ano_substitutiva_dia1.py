@@ -17,7 +17,7 @@ DISCIPLINAS = [
 RESPOSTAS = (
     "D", "B", "A", "B", "B", "C",  # Educacao Fisica: 1-6
     "C", "A", "C", "D", "B", "A",  # Historia: 7-12
-    "A", "X", "B", "B", "B", "C",  # Portugues: 13-24
+    "A", "A", "B", "B", "B", "C",  # Portugues: 13-24
     "C", "A", "B", "A", "B", "A",
     "D", "C", "B", "D", "D", "B",  # Geografia: 25-30
 )
@@ -62,7 +62,7 @@ def main():
             _buscar_gabarito(db, modelo.id, SERIE, CODIGO_GABARITO),
         )
         db.commit()
-        print(f"Takaoka: 7o ano, 4o bimestre, dia 1, SUBSTITUTIVA: 30 questoes; 14 anulada.")
+        print("Takaoka: 7o ano, 4o bimestre, dia 1, SUBSTITUTIVA: 30 questoes; questao 14 = A.")
         print(f"{recalculados} resultados recalculados.")
 
 

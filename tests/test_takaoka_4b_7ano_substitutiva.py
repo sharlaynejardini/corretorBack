@@ -57,7 +57,7 @@ class TakaokaSubstitutivaTest(unittest.TestCase):
             self.assertEqual(tuple(g.resposta_correta for g in gs), seed.RESPOSTAS)
             self.assertEqual([gs[i-1].disciplina for i in (1, 7, 13, 25)],
                              ["Ed. Fisica", "Historia", "Portugues", "Geografia"])
-            self.assertEqual(gs[13].resposta_correta, "X")
+            self.assertEqual(gs[13].resposta_correta, "A")
             regular = db.query(models.Gabarito).filter_by(modelo_prova_id=self.modelo_id,
                       serie=7, codigo_gabarito="CADERNO_A").all()
             self.assertEqual(len(regular), 30)
@@ -65,7 +65,7 @@ class TakaokaSubstitutivaTest(unittest.TestCase):
             padrao = buscar_modelo_prova(self.escola_id, 4, 1, db=db)
             self.assertEqual(padrao["disciplinas"][0].disciplina, "Portugues")
 
-    def test_correcao_na_numeracao_original_e_anulada(self):
+    def test_correcao_na_numeracao_original(self):
         with self.sessions() as db:
             aluno = models.Aluno(escola_id=self.escola_id, nome="Aluno teste", numero_chamada=1)
             db.add(aluno)
@@ -86,6 +86,33 @@ class TakaokaSubstitutivaTest(unittest.TestCase):
                              ["Portugues", "Historia", "Geografia", "Ed. Fisica"])
             self.assertEqual(tabulado["por_disciplina"]["Portugues"]["total"], 12)
             self.assertEqual(tabulado["linhas"][0]["numero_questao"], 1)
+
+    def test_recorrige_resultado_anterior_com_questao_14_anulada(self):
+        with self.sessions() as db:
+            gs = db.query(models.Gabarito).filter_by(modelo_prova_id=self.modelo_id,
+                  serie=7, codigo_gabarito="SUBSTITUTIVA").order_by(models.Gabarito.numero_questao).all()
+            gs[13].resposta_correta = "X"
+            for chamada, resposta14 in enumerate(("A", "B", None), 1):
+                aluno = models.Aluno(escola_id=self.escola_id, nome=f"Teste {chamada}", numero_chamada=chamada)
+                db.add(aluno)
+                db.flush()
+                respostas = {i: r for i, r in enumerate(seed.RESPOSTAS, 1)}
+                respostas[14] = resposta14
+                acertos, _ = _comparar_e_salvar_respostas(db, aluno.id, self.modelo_id, gs, respostas)
+                self.assertEqual(acertos, 30)
+                db.add(models.ResultadoAluno(aluno_id=aluno.id, modelo_prova_id=self.modelo_id,
+                       escola_id=self.escola_id, bimestre=4, dia=1, serie=7,
+                       codigo_gabarito="SUBSTITUTIVA", acertos=30, total_questoes=30, nota_global=10))
+            db.commit()
+        with patch.object(seed, "SessionLocal", self.sessions):
+            seed.main()
+        with self.sessions() as db:
+            resultados = db.query(models.ResultadoAluno).join(models.Aluno).order_by(models.Aluno.numero_chamada).all()
+            self.assertEqual([r.acertos for r in resultados], [30, 29, 29])
+            respostas14 = db.query(models.RespostaAluno).filter_by(modelo_prova_id=self.modelo_id,
+                          numero_questao=14).all()
+            self.assertTrue(all(r.resposta_correta == "A" for r in respostas14))
+            self.assertEqual(sum(r.acertou for r in respostas14), 1)
 
 
 if __name__ == "__main__":
