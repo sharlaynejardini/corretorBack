@@ -512,6 +512,60 @@ def _preparar_leitura_takaoka(folha):
     return folha_cinza, folha_threshold
 
 
+def _processar_folha_daniela_62(imagem):
+    """Localiza o quadro das duas grades e corrige fotos em qualquer orientacao."""
+    contornos, _ = cv2.findContours(
+        _bordas_imagem(imagem), cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE,
+    )
+    candidatos = []
+    area_imagem = imagem.shape[0] * imagem.shape[1]
+    for contorno in sorted(contornos, key=cv2.contourArea, reverse=True):
+        if cv2.contourArea(contorno) < area_imagem * 0.04:
+            continue
+        aproximado = cv2.approxPolyDP(contorno, 0.02 * cv2.arcLength(contorno, True), True)
+        if len(aproximado) != 4:
+            continue
+        recorte = transformar_perspectiva(imagem, aproximado.reshape(4, 2))
+        recorte = _normalizar_orientacao_paisagem(recorte)
+        proporcao = recorte.shape[1] / float(max(recorte.shape[0], 1))
+        if 1.6 <= proporcao <= 3.1:
+            candidatos.append(imutils.resize(recorte, width=1700))
+        if len(candidatos) >= 8:
+            break
+
+    melhor = None
+    for candidato in candidatos:
+        for recorte in (candidato, cv2.rotate(candidato, cv2.ROTATE_180)):
+            cinza = cv2.cvtColor(recorte, cv2.COLOR_BGR2GRAY)
+            grade = cv2.adaptiveThreshold(
+                cinza, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY_INV, 31, 5,
+            )
+            _, marcacoes = _limiarizar_folha(recorte)
+            leitura = _ler_grade_daniela_62(marcacoes, grade)
+            if leitura is None:
+                continue
+            respostas, debug = leitura
+            respondidas = sum(resposta is not None for resposta in respostas.values())
+            blocos, _, _ = _detectar_blocos_daniela_10x2(grade, quantidade=31)
+            tinta_cabecalho = sum(
+                cv2.countNonZero(marcacoes[y + int(h * 0.03):y + int(h * 0.11),
+                                           x + int(w * 0.05):x + int(w * 0.95)])
+                / max(int(h * 0.08) * int(w * 0.90), 1)
+                for x, y, w, h in blocos
+            )
+            pontuacao = respondidas * 1000 + _pontuar_debug(debug) - tinta_cabecalho * 1000000
+            if melhor is None or pontuacao > melhor[0]:
+                melhor = (pontuacao, recorte, cinza, marcacoes, grade)
+    if melhor is None:
+        return None, "Nao consegui localizar as duas grades de 31 questoes da Daniela."
+    _, folha, cinza, marcacoes, grade = melhor
+    return {
+        "folha": folha, "folha_cinza": cinza,
+        "folha_threshold": marcacoes, "folha_threshold_grade": grade,
+    }, None
+
+
 def processar_folha(caminho_arquivo, total_questoes=None):
     imagem = cv2.imread(caminho_arquivo)
 
@@ -522,6 +576,9 @@ def processar_folha(caminho_arquivo, total_questoes=None):
         imagem = imutils.resize(imagem, height=1200)
         original = imagem.copy()
         bordas = _bordas_imagem(imagem)
+
+        if total_questoes == 62:
+            return _processar_folha_daniela_62(original)
 
         if total_questoes in {20, 30}:
             def preparar_recortes_takaoka(incluir_inclinacoes=False):
@@ -1293,7 +1350,7 @@ def _ler_grade_takaoka_15x2(folha_threshold):
     return respostas, debug
 
 
-def _detectar_blocos_daniela_10x2(folha_threshold):
+def _detectar_blocos_daniela_10x2(folha_threshold, quantidade=10):
     altura, largura = folha_threshold.shape
     kernel_vertical = cv2.getStructuringElement(
         cv2.MORPH_RECT,
@@ -1319,10 +1376,11 @@ def _detectar_blocos_daniela_10x2(folha_threshold):
         x, y, w, h = cv2.boundingRect(contorno)
         proporcao = w / float(max(h, 1))
 
-        if w < largura * 0.55 or h < altura * 0.18:
+        if w < largura * 0.55 or h < altura * (0.08 if quantidade == 31 else 0.18):
             continue
 
-        if not 1.80 <= proporcao <= 4.20:
+        minimo, maximo = (4.0, 8.5) if quantidade == 31 else (1.80, 4.20)
+        if not minimo <= proporcao <= maximo:
             continue
 
         blocos.append((x, y, w, h))
@@ -1330,10 +1388,46 @@ def _detectar_blocos_daniela_10x2(folha_threshold):
     if len(blocos) < 2:
         return None
 
+    if quantidade == 31:
+        pares = [
+            (a, b) for a in blocos for b in blocos
+            if b[1] >= a[1] + a[3]
+            and 0.90 <= a[2] / b[2] <= 1.10
+            and 0.85 <= a[3] / b[3] <= 1.15
+            and abs(a[0] - b[0]) < largura * 0.05
+        ]
+        if not pares:
+            return None
+        par = max(pares, key=lambda par: sum(w * h for _, _, w, h in par))
+        return list(par), linhas_verticais, linhas_horizontais
+
     blocos = sorted(blocos, key=lambda bloco: bloco[2] * bloco[3], reverse=True)[:4]
     blocos = sorted(blocos, key=lambda bloco: bloco[1])[:2]
 
     return blocos, linhas_verticais, linhas_horizontais
+
+
+def _ler_grade_daniela_62(folha_threshold, folha_threshold_grade=None):
+    threshold_grade = folha_threshold_grade if folha_threshold_grade is not None else folha_threshold
+    blocos_info = _detectar_blocos_daniela_10x2(threshold_grade, quantidade=31)
+    if blocos_info is None:
+        return None
+    blocos, _, _ = blocos_info
+    # Cada tabela possui cabecalho, numeracao e cinco linhas de alternativas.
+    grade = []
+    for indice_bloco, (x, y, w, h) in enumerate(blocos):
+        for coluna in range(31):
+            grade.append({
+                "questao": indice_bloco * 31 + coluna + 1,
+                "x": int(x + (coluna + 0.5) * w / 31),
+                "linhas": {a: int(y + (linha + 2.5) * h / 7)
+                           for linha, a in enumerate("ABCDE")},
+                "bloco": "superior" if indice_bloco == 0 else "inferior",
+                "raio_x": max(int(w / 31 * 0.34), 2),
+                "raio_y": max(int(h / 7 * 0.32), 2),
+                "fator_minimo_marcacao": 0.25,
+            })
+    return _ler_grade(folha_threshold, 62, grade)
 
 
 def _ler_grade_daniela_10x2_por_linhas(folha_threshold, folha_threshold_grade=None):
@@ -1878,6 +1972,12 @@ def _pontuar_recorte_por_total(recorte, total_questoes):
 def _ler_grade_com_tentativas(folha_threshold, total_questoes, folha_threshold_grade=None):
     altura, largura = folha_threshold.shape
 
+    if total_questoes == 62:
+        leitura = _ler_grade_daniela_62(folha_threshold, folha_threshold_grade)
+        if leitura is None:
+            raise ValueError("Nao consegui ler as duas grades de 31 questoes da Daniela.")
+        return leitura
+
     if total_questoes == 14:
         return _ler_grade_daniela_14(folha_threshold)
 
@@ -2023,6 +2123,7 @@ def ler_respostas_grade_fixa(folha_threshold, total_questoes=22, folha_threshold
     - 22 para EMEF DEP. AGENOR LINO DE MATTOS no 1o bimestre
     - 25 para EMEF DEP. AGENOR LINO DE MATTOS no 2o bimestre
     - 20 para EMEF MARIA VILANI DANIELA PINHEIRO no Simulado Agosto
+    - 62 para Daniela no 2o Simulado do 4o bimestre (90-120 e 136-166)
     - 30 para EMEF YOJIRO TAKAOKA
     """
     if folha_threshold is None:
