@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import patch
 
@@ -6,10 +7,11 @@ import numpy as np
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-import models
-import seed_daniela_4b as seed
-from database import Base
-from main import _comparar_e_salvar_respostas
+with patch.dict(os.environ, {"DATABASE_URL": ""}):
+    import models
+    import seed_daniela_4b as seed
+    from database import Base
+    from main import _comparar_e_salvar_respostas
 from processador_imagem import ler_respostas_grade_fixa
 
 

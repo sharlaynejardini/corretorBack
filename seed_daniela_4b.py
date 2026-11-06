@@ -31,6 +31,10 @@ def main():
     if (len(RESPOSTAS) != 62 or len(NUMEROS_IMPRESSOS) != len(RESPOSTAS)
             or set(RESPOSTAS) - set("ABCDEX")):
         raise ValueError("O modelo Daniela deve ter 62 questoes.")
+    # main prepara o banco ao importar; carregar antes da transacao evita
+    # que essa preparacao espere pelos locks dos INSERTs do proprio cadastro.
+    from main import _buscar_gabarito, _recalcular_resultados_por_gabarito
+
     _preparar_banco()
 
     with SessionLocal() as db:
@@ -80,8 +84,6 @@ def main():
             gabarito.disciplina = DISCIPLINAS[indice - 1][0]
             gabarito.resposta_correta = resposta
         db.flush()
-
-        from main import _buscar_gabarito, _recalcular_resultados_por_gabarito
 
         recalculados = _recalcular_resultados_por_gabarito(
             db, modelo, SERIE, CODIGO_GABARITO,
